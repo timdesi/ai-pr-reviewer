@@ -1,0 +1,24 @@
+# local dev & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# runtime state (review jobs, sqlite, workspaces, temp analysis)
+jobs/
+data/
+tmp-ab/
+*.sqlite3
+
+# dependencies
+node_modules/
+
+# logs, editor & os cruft
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# heavy/intermediate build artifacts
+*.pdf
+*.odp
+*.pptx

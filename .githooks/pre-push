@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Block pushes that contain corporate / internal strings.
+# Enable: git config core.hooksPath .githooks
+set -euo pipefail
+
+BANNED='(socialcoding|rb-tracker|rb-proxy|rb-artifactory|bosch|procon|@bosch|3fc41f2708|Desislav)'
+ZERO=0000000000000000000000000000000000000000
+
+while read -r _local _lsha _remote _rsha; do
+  # branch deletion or no local sha -> nothing to check
+  [ "$_lsha" = "$ZERO" ] && continue
+
+  # range checks only when we can resolve both sides (skip first push)
+  if [ "$_rsha" != "$ZERO" ] && git rev-parse -q --verify "$_rsha" >/dev/null 2>&1; then
+    range="${_rsha}..${_lsha}"
+    if git log --format=%B "$range" | grep -qEi "$BANNED"; then
+      echo "pre-push: banned text in commit message(s) of $range" >&2
+      exit 1
+    fi
+    if git diff "$_rsha" "$_lsha" | grep -qEi "$BANNED"; then
+      echo "pre-push: banned text in diff of $range" >&2
+      exit 1
+    fi
+  fi
+
+  # full-tree scan of the pushed HEAD (skip the hook's own definition + binary artifacts)
+  if git grep -InEi "$BANNED" "$_lsha" -- . \
+     ':(exclude)*.pdf' ':(exclude)*.odp' ':(exclude)*.pptx' \
+     ':(exclude)SCRUB-PLAN.md' ':(exclude).githooks/pre-push' \
+     >/dev/null 2>&1; then
+    echo "pre-push: banned text in pushed tree ($_lsha)" >&2
+    exit 1
+  fi
+done
+
+exit 0

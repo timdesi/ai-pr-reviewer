@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Pull Request Reviewer — Usage Leaflet</title>
+<!--
+  Printable A4 leaflet (one page). Open in a browser and print:
+    - Paper: A4, margins: none, Background graphics: ON
+  or export to PDF (File > Print > Save as PDF).
+  Self-contained: no external fonts or assets.
+-->
+<style>
+  :root{
+    --blue:#007BC0;        /* primary blue */
+    --deep:#004975;        /* deep blue */
+    --soft:#E3F0FA;        /* light blue panel */
+    --ink:#000;
+    --muted:#424C58;
+    --gray:#B2B3B5;
+    --panel:#EFF1F2;
+    --line:#D9DEE2;
+    --good:#0A7D4F;
+    --warn:#B45309;
+    --bad:#B91C1C;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    font-family:"Helvetica Neue",Arial,sans-serif;
+    color:var(--ink);
+    background:#d7dadd;
+    font-size:11.5px;
+    line-height:1.36;
+  }
+  .page{
+    width:210mm;
+    min-height:297mm;
+    background:#fff;
+    margin:12px auto 0;
+    padding:12mm 14mm 16mm;
+    position:relative;
+    box-shadow:0 2px 18px rgba(0,0,0,.25);
+  }
+  @media print{
+    body{background:#fff;}
+    .page{box-shadow:none;margin:0;}
+  }
+  @page{size:A4;margin:0;}
+
+  /* SuperGraphic strip */
+  .page::before{
+    content:"";position:absolute;left:0;right:0;bottom:0;height:6mm;
+    background:linear-gradient(90deg,var(--blue) 0%,var(--deep) 100%);
+  }
+
+  .kicker{
+    color:var(--blue);font-weight:700;letter-spacing:2px;text-transform:uppercase;font-size:10px;margin-bottom:5px;
+  }
+  h1{font-size:33px;line-height:1.05;color:var(--ink);letter-spacing:-.5px;font-weight:800;}
+  h1 .accent{color:var(--blue);}
+  .sub{color:var(--muted);font-size:14px;margin-top:6px;}
+  h2{
+    font-size:14.5px;color:var(--blue);margin:0 0 9px;padding-bottom:5px;
+    border-bottom:2px solid var(--deep);
+  }
+  h2 .num{
+    display:inline-block;background:var(--deep);color:#fff;border-radius:3px;
+    font-size:9.5px;padding:1px 7px;margin-right:7px;vertical-align:2px;letter-spacing:.4px;
+  }
+
+  .hero{
+    display:flex;justify-content:space-between;align-items:center;gap:16px;
+    border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:22px;
+  }
+  .herostat{
+    background:var(--soft);border:1px solid var(--line);border-radius:10px;
+    padding:10px 18px;text-align:center;min-width:192px;
+  }
+  .herostat .m{
+    font-size:19px;font-weight:800;color:var(--deep);letter-spacing:-.3px;
+    white-space:nowrap;line-height:1;
+  }
+  .herostat .l{
+    font-size:8.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;
+    margin-top:4px;white-space:nowrap;
+  }
+
+  .cols-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:24px;}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px;}
+  .card h3{color:var(--blue);font-size:12.5px;margin-bottom:4px;}
+  .card p,.card ul{font-size:10.7px;color:var(--ink);}
+  .card ul{padding-left:15px;}
+  .card li{margin-bottom:3px;}
+
+  .verdict{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .v{
+    display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:6px;
+    padding:7px 9px;background:#fff;
+  }
+  .v .ico{font-size:15px;}
+  .v b{display:block;font-size:11px;}
+  .v span{font-size:9.5px;color:var(--muted);}
+  .g{color:var(--good);} .w{color:var(--warn);} .b{color:var(--bad);}
+
+  .readrow{display:grid;grid-template-columns:1.1fr 1fr;gap:14px;margin-bottom:24px;}
+  table{width:100%;border-collapse:collapse;font-size:10px;}
+  th{background:var(--deep);color:#fff;text-align:left;padding:5px 9px;font-weight:700;}
+  td{border:1px solid var(--line);padding:5px 9px;vertical-align:top;}
+  tr:nth-child(even) td{background:var(--panel);}
+  code{
+    font-family:"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+    background:var(--panel);border:1px solid var(--line);border-radius:4px;
+    padding:0 4px;color:var(--deep);font-size:.92em;
+  }
+  .quote{
+    background:var(--soft);border-left:4px solid var(--blue);border-radius:0 6px 6px 0;
+    padding:8px 12px;color:var(--deep);font-weight:600;font-size:11.3px;
+  }
+  .footnote{color:var(--muted);font-size:9.4px;margin-top:7px;font-style:italic;}
+  ul.tick{list-style:none;padding-left:0;}
+  ul.tick li{padding-left:14px;position:relative;margin-bottom:4px;font-size:10.7px;}
+  ul.tick li::before{content:"✓";color:var(--good);position:absolute;left:0;top:0;font-weight:700;}
+  .readcol{display:flex;flex-direction:column;}
+  .readcol ul{
+    flex:1;display:flex;flex-direction:column;justify-content:space-between;margin-bottom:0;
+  }
+  .readlist li{margin-bottom:0;}
+  .footer-note{
+    position:absolute;left:14mm;right:14mm;bottom:12mm;font-size:9px;color:var(--muted);
+    display:flex;justify-content:space-between;
+  }
+</style>
+</head>
+<body>
+
+<section class="page">
+
+  <div class="kicker">What it is · how to use it · why we should use it</div>
+  <div class="hero">
+    <div>
+      <h1>AI Pull-Request <span class="accent">Reviewer</span></h1>
+      <div class="sub">On-demand AI code review for our Bitbucket pull requests — one verified, prioritized comment per review.</div>
+    </div>
+    <div class="herostat">
+      <div class="m">~3&nbsp;min&nbsp;·&nbsp;~€0.04</div>
+      <div class="l">typical time &amp; cost per review</div>
+    </div>
+  </div>
+
+  <h2><span class="num">START</span> A review starts three ways</h2>
+  <div class="cols-3">
+    <div class="card">
+      <h3>💬 Comment</h3>
+      <p>Type <code>/ai-review</code> on the pull request. Add <code>--force</code> to re-review an unchanged head.</p>
+    </div>
+    <div class="card">
+      <h3>➕ Add reviewer</h3>
+      <p>Add the AI reviewer user as a PR <strong>reviewer</strong> — the review starts automatically.</p>
+    </div>
+    <div class="card">
+      <h3>🚀 Open / ready</h3>
+      <p>A non-draft PR opened, or a draft marked ready, with the AI reviewer among its reviewers — review starts.</p>
+    </div>
+  </div>
+  <div class="footnote" style="margin:4px 0 18px">Merge/backport PRs (e.g. <code>develop ↔ release/*</code>) are skipped. Only users on the allowlist can trigger.</div>
+
+  <h2><span class="num">READ</span> How to read the comment</h2>
+  <div class="readrow">
+    <div class="verdict">
+      <div class="v"><span class="ico">🔴</span><div><b class="b">Do not merge</b><span>critical issues must be resolved</span></div></div>
+      <div class="v"><span class="ico">🟠</span><div><b class="b">Do not merge</b><span>high-severity issues found</span></div></div>
+      <div class="v"><span class="ico">🟡</span><div><b class="w">Worth addressing</b><span>before merge</span></div></div>
+      <div class="v"><span class="ico">✅</span><div><b class="g">Nothing blocks merge</b><span>low-severity or clean</span></div></div>
+      <div class="v" style="grid-column:1 / -1;background:var(--panel)">
+        <span class="ico">⚖️</span>
+        <div><b>Every finding is self-contained</b><span>title + file:line · impact · verbatim evidence · suggested fix · "What's good" · Jira coverage (Met / Partial / Unmet / Not verified)</span></div>
+      </div>
+    </div>
+    <div class="readcol">
+      <ul class="tick readlist">
+        <li><strong>Three reviewers + consensus</strong> run in parallel (a 4th joins on translation PRs), then verify, dedupe and prioritize.</li>
+        <li><strong>Severity:</strong> CRITICAL 🔴 · HIGH 🟠 · MEDIUM 🟡 · LOW ⚪ — below-threshold findings collapse under "Minor".</li>
+        <li><strong>Evidence-grounded:</strong> checks (schema, line numbers, evidence, SHA) run as code, not in the prompt.</li>
+        <li><strong>Published only for the reviewed revision</strong> — a changed PR never gets a stale report.</li>
+        <li><strong>Translation PRs</strong> get a dedicated "Language &amp; content" section — advisory below HIGH.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">WHY</span> What it gives us</h2>
+  <div class="two">
+    <div class="card">
+      <h3>For the team</h3>
+      <ul class="tick">
+        <li>Catches silent regressions before merge; consistent depth (security, concurrency, compatibility, Jira criteria)</li>
+        <li>A second pair of eyes, not a replacement — human review stays, on a verified baseline</li>
+        <li>Feedback in minutes, not "when someone gets to it"</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>For the business</h3>
+      <ul class="tick">
+        <li>Faster feedback → shorter cycle time, fewer late reworks; review capacity on demand, 24/7</li>
+        <li>Tiny footprint: one OpenShift pod + small volume; latency, cost and quality tracked per review</li>
+        <li>Teams can tune the reviewer per repo in plain markdown — no code change</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">REF</span> Quick reference — the dashboard</h2>
+  <table>
+    <tr><th style="width:22%">Dashboard</th><th>How</th></tr>
+    <tr><td>Open</td><td>the dashboard <strong>UI</strong> — served with the reviewer service</td></tr>
+    <tr><td>Watch live</td><td>pipeline + streaming agent replies (SSE)</td></tr>
+    <tr><td>Publish / new review</td><td>buttons on the dashboard</td></tr>
+    <tr><td>History &amp; cost</td><td>browse <code>dev/jobs/</code>, per-run cost shown</td></tr>
+  </table>
+
+  <div class="quote" style="margin-top:18px">Read-only by design · no stale reviews · prompt-injection-aware — a failed or partial review is never presented as a clean one.</div>
+
+  <div class="footer-note"><span>More: <code>docs/ai-pr-reviewer-usage-guide.md</code> · <code>docs/ai-pr-reviewer-cheatsheet.md</code></span><span>AI PR Reviewer · Engineering · Architects · Management — Nov 2026</span></div>
+</section>
+
+</body>
+</html>

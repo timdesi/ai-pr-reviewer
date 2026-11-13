@@ -1,0 +1,127 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "aifarm": {
+      "package": "@opencode/ai/providers/google-vertex/messages",
+      "name": "Example AI Farm (Anthropic)",
+      "settings": {
+        "baseURL": "https://llm-gateway.example.com/api/google/v1/publishers/anthropic/models",
+        "accessToken": "{env:ANTHROPIC_AUTH_TOKEN}"
+      },
+      "models": {
+        "claude-haiku-5-5": {
+          "name": "Claude Haiku 5.5 (AI Farm)",
+          "capabilities": { "input": ["text", "image"], "output": ["text"] },
+          "cost": {
+            "input": 0.1,
+            "output": 0.5,
+            "cache": { "read": 0.01, "write": 0.125 }
+          },
+          "limit": { "context": 1000000, "output": 128000 }
+        }
+      }
+    },
+    "aifarm-openai": {
+      "package": "@opencode/ai/providers/azure/chat",
+      "name": "Example AI Farm (OpenAI)",
+      "settings": {
+        "baseURL": "https://llm-gateway.example.com/api/openai",
+        "apiKey": "{env:ANTHROPIC_AUTH_TOKEN}",
+        "apiVersion": "2025-04-01-preview",
+        "useDeploymentBasedUrls": true
+      },
+      "models": {
+        "deepseek-v4-pro-2026-04-23": {
+          "name": "DeepSeek V4 Pro (AI Farm)",
+          "capabilities": { "input": ["text"], "output": ["text"] },
+          "limit": { "context": 1000000, "output": 384000 },
+          "cost": { "input": 0.435, "output": 0.87 }
+        }
+      }
+    },
+    "aifarm-deepseek-flash": {
+      "package": "@opencode/ai/providers/azure/chat",
+      "name": "Example AI Farm (DeepSeek Flash)",
+      "settings": {
+        "baseURL": "https://llm-gateway.example.com/api/openai",
+        "apiKey": "{env:ANTHROPIC_AUTH_TOKEN}",
+        "apiVersion": "2025-04-01-preview",
+        "useDeploymentBasedUrls": true
+      },
+      "models": {
+        "deepseek-v4-flash-2026-04-23": {
+          "name": "DeepSeek V4 Flash (AI Farm)",
+          "capabilities": { "input": ["text"], "output": ["text"] },
+          "limit": { "context": 1000000, "output": 384000 }
+        }
+      }
+    },
+    "aifarm-gpt": {
+      "package": "@opencode/ai/providers/azure/chat",
+      "name": "Example AI Farm (GPT)",
+      "settings": {
+        "baseURL": "https://llm-gateway.example.com/api/openai",
+        "apiKey": "{env:ANTHROPIC_AUTH_TOKEN}",
+        "apiVersion": "2025-04-01-preview",
+        "useDeploymentBasedUrls": true
+      },
+      "models": {
+        "gpt-6-luna-2026-09-22": {
+          "modelID": "gpt-6-luna-2026-09-22",
+          "name": "GPT-6 Luna (AI Farm)",
+          "capabilities": { "input": ["text", "image"], "output": ["text"] },
+          "compatibility": { "maxTokensField": "max_completion_tokens" },
+          "body": { "reasoning_effort": "none" },
+          "limit": { "context": 200000, "output": 16384 },
+          "cost": { "input": 0.1, "output": 0.5 }
+        }
+      }
+    },
+    "aifarm-msp": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "name": "AI Farm MSP (Example)",
+      "settings": {
+        "baseURL": "https://llm-gateway.example.com/api/providers/example/msp/glm-5.2/v1",
+        "apiKey": "{env:ANTHROPIC_AUTH_TOKEN}"
+      },
+      "models": {
+        "zai-glm-52": {
+          "name": "z.AI GLM-5.2 (AI Farm MSP)",
+          "capabilities": { "input": ["text"], "output": ["text"] },
+          "limit": { "context": 1048576, "output": 131072 },
+          "cost": {
+            "input": 0.418,
+            "output": 1.338,
+            "cache": { "read": 0.078, "write": 0.418 }
+          }
+        },
+        "DeepSeek-V4-Flash-0731": {
+          "name": "DeepSeek V4 Flash (AI Farm MSP)",
+          "capabilities": { "input": ["text"], "output": ["text"] },
+          "settings": {
+            "baseURL": "https://llm-gateway.example.com/api/providers/example/msp/deepseek-v4-flash/v1"
+          },
+          "limit": { "context": 262144, "output": 131072 },
+          "cost": {
+            "input": 0.068,
+            "output": 0.153,
+            "cache": { "read": 0.014, "write": 0.068 }
+          }
+        },
+        "Qwen-38-27B": {
+          "name": "Qwen 3.8 27B (AI Farm MSP)",
+          "capabilities": { "input": ["text", "image"], "output": ["text"] },
+          "settings": {
+            "baseURL": "https://llm-gateway.example.com/api/providers/example/msp/qwen3.8-27b/v1"
+          },
+          "limit": { "context": 262144, "output": 131072 },
+          "cost": {
+            "input": 0.153,
+            "output": 0.921,
+            "cache": { "read": 0.031, "write": 0.153 }
+          }
+        }
+      }
+    }
+  }
+}

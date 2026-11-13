@@ -1,0 +1,9 @@
+{
+  "name": "opencode-aifarm-anthropic",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.mjs",
+  "dependencies": {
+    "@ai-sdk/google-vertex": "5.0.87"
+  }
+}

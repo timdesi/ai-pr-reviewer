@@ -1,0 +1,17 @@
+{
+  "name": "ai-pr-reviewer",
+  "version": "0.3.9",
+  "private": true,
+  "description": "On-demand AI pull-request reviewer for Bitbucket Data Center",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "review": "node --env-file-if-exists=.env src/cli.js review",
+    "ui": "node --env-file-if-exists=.env src/server.js",
+    "help": "node --env-file-if-exists=.env src/cli.js help",
+    "build:agents": "node scripts/build-agents.mjs",
+    "test": "node scripts/build-agents.mjs --check && node --test tests/extractJson.test.js tests/webhook.test.js tests/config.test.js tests/context.test.js tests/discussion.test.js tests/prImages.test.js tests/checkout.test.js tests/jira.test.js tests/report.test.js tests/costs.test.js tests/opencode.test.js tests/pulls.test.js tests/stats.test.js tests/grounding.test.js tests/agents.test.js tests/diff.test.js tests/previous.test.js"
+  }
+}

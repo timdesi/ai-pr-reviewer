@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI PR Reviewer</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">🤖</span>
+      <h1>AI PR Reviewer</h1>
+      <span id="backend-state" class="pill">–</span>
+    </div>
+    <form id="new-review" autocomplete="off">
+      <input id="pr-input" type="text" placeholder="PROJ/slug#123 or full PR URL" spellcheck="false" />
+      <label class="check"><input id="publish-check" type="checkbox" /> publish</label>
+      <button id="start-btn" type="submit">▶ Review</button>
+    </form>
+    <div class="header-actions">
+      <button id="stats-nav" type="button" title="Management statistics">📊 Stats</button>
+      <div id="model-settings">
+      <button id="models-toggle" type="button">Models ▾</button>
+      <div id="models-panel" hidden>
+        <div class="model-row"><label for="ms-a">Reviewer A</label><select id="ms-a" data-model-slot="a"></select></div>
+        <div class="model-row"><label for="ms-b">Reviewer B</label><select id="ms-b" data-model-slot="b"></select></div>
+        <div class="model-row"><label for="ms-c">Reviewer C</label><select id="ms-c" data-model-slot="c"></select></div>
+        <div class="model-row"><label for="ms-d">Reviewer D</label><select id="ms-d" data-model-slot="d"></select></div>
+        <div class="model-row"><label for="ms-consensus">Consensus</label><select id="ms-consensus" data-model-slot="consensus"></select></div>
+        <div class="model-row"><label for="ms-vision">Vision (screenshots)</label><select id="ms-vision" data-model-slot="vision"></select><span class="dim">image-capable models only</span></div>
+        <div class="models-actions">
+          <button id="save-models" type="button">💾 Save as defaults</button>
+          <span id="models-status" class="dim"></span>
+        </div>
+        <p class="dim hint">
+          The dropdowns apply to your next review. “Save as defaults” persists the choice
+          for all future reviews (UI runs and the <code>/ai-review</code> webhook) on this pod.
+        </p>
+      </div>
+    </div>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="aside-head">
+        <div id="mode-toggle">
+          <button data-mode="pulls" class="active" title="Review history per pull request">PRs</button>
+          <button data-mode="jobs" title="Flat list of review runs">Jobs</button>
+        </div>
+        <button id="refresh-jobs" title="Refresh">&circlearrowleft;</button>
+      </div>
+      <div id="app-filter-row" class="app-filter">
+        <label for="app-filter">App</label>
+        <select id="app-filter" title="Filter PRs by app (project/repo)">
+          <option value="">All apps</option>
+        </select>
+      </div>
+      <ul id="pulls-list"></ul>
+      <div id="pulls-pager" class="pager" hidden></div>
+      <ul id="job-list" hidden></ul>
+      <div id="job-pager" class="pager" hidden></div>
+    </aside>
+
+    <section id="detail">
+      <div id="empty-state" class="empty">
+        <p>Nothing selected.</p>
+        <p class="dim">Pick a pull request (or review run) from the list, or start a review above.</p>
+      </div>
+      <div id="job-view" hidden>
+        <div id="job-head"></div>
+        <nav id="tabs">
+          <button data-tab="overview" class="active">Overview</button>
+          <button data-tab="reviewers">Reviewers</button>
+          <button data-tab="draft">Comment draft</button>
+          <button data-tab="artifacts">Artifacts</button>
+        </nav>
+        <div id="tab-content"></div>
+      </div>
+      <div id="stats-view" hidden></div>
+    </section>
+  </main>
+
+  <div id="modal" hidden>
+    <div class="modal-box">
+      <div class="modal-head"><span id="modal-title"></span><button id="modal-close">✕</button></div>
+      <pre id="modal-body"></pre>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
