@@ -24,6 +24,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { log } from "./log.js";
+import { backendConfig } from "./clients.js";
 
 function git(args) {
   return spawnSync("git", args, {
@@ -41,8 +42,25 @@ function throwIf(res, what) {
   return res;
 }
 
+/** The git clone host for a GitHub API base (github.com vs GHES). */
+function githubGitHost(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    if (u.host === "api.github.com") return "github.com";
+    // GHES: the API lives at <host>/api/v3; the git clone host is the same
+    // origin (no path).
+    return u.host;
+  } catch {
+    return "github.com";
+  }
+}
+
 /** https://<host>/scm/<projectKey>/<repoSlug>.git — Bitbucket DC layout. */
-export function scmUrl({ baseUrl, projectKey, repoSlug }) {
+export function scmUrl({ baseUrl, projectKey, repoSlug, platform }) {
+  if (platform === "github") {
+    const host = githubGitHost(baseUrl);
+    return `https://${host}/${encodeURIComponent(projectKey)}/${encodeURIComponent(repoSlug)}.git`;
+  }
   const host = new URL(baseUrl).host;
   return `https://${host}/scm/${String(projectKey).toLowerCase()}/${String(repoSlug).toLowerCase()}.git`;
 }
@@ -81,13 +99,13 @@ async function withLock(lock, fn, timeoutMs = 30000) {
 }
 
 /** Ensure the bare cache repo exists, configured for this cluster, and fetch the reviewed SHA. */
-async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin }) {
+async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin, platform }) {
   const bare = bareRepoDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
   mkdirSync(path.dirname(bare), { recursive: true });
 
   if (!existsSync(path.join(bare, "HEAD"))) {
     throwIf(git(["init", "--bare", bare]), "git init");
-    const url = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+    const url = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
     throwIf(git(["--git-dir", bare, "remote", "add", "origin", url]), "git remote add");
     if (!verifyTls) git(["--git-dir", bare, "config", "http.sslVerify", "false"]);
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
@@ -106,9 +124,10 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
 
   // Some Bitbucket DC versions accept REST Bearer but not git Bearer; fall back
   // to basic auth with the token as password (credentials in the URL, used
-  // inline so they are never persisted in the repo config). Local file remotes
-  // (tests) skip this — they need no auth.
-  const baseUrl2 = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  // inline so they are never persisted in the repo config). GitHub accepts a
+  // PAT as the password the same way. Local file remotes (tests) skip this —
+  // they need no auth.
+  const baseUrl2 = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
   if (token && /^https?:/i.test(baseUrl2)) {
     const u = new URL(baseUrl2);
     u.username = username;
@@ -202,17 +221,24 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
     // The workspace dir may not exist yet in the pod (only jobs/ is pre-created
     // in the image); the lock + bare repos live under it, so create it first.
     mkdirSync(workspaceRoot, { recursive: true });
+    // Platform-selected backend (github vs bitbucket). A GitHub ref needs the
+    // github block — never silently clone from the Bitbucket host.
+    const backend = backendConfig(config, ref);
+    if (ref?.platform === "github" && !backend) {
+      return { ok: false, reason: "github backend not configured (GITHUB_TOKEN)" };
+    }
     return await withLock(lock, async () => {
       const bare = await ensureFetched({
-        baseUrl: config.bitbucket.baseUrl,
-        token: config.bitbucket.token,
-        username: config.bitbucket.username,
-        verifyTls: config.bitbucket.verifyTls,
+        baseUrl: backend.baseUrl,
+        token: backend.token,
+        username: backend.username,
+        verifyTls: backend.verifyTls,
         workspaceRoot,
         ref,
         sha,
         branch,
         origin,
+        platform: ref?.platform,
       });
       const wt = ensureWorktree({ workspaceRoot, ref, sha, bare });
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });

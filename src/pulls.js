@@ -27,7 +27,12 @@ export function clearPullCache() {
 
 export function keyOf(ref) {
   if (!ref) return null;
-  return `${ref.projectKey}/${ref.repoSlug}#${ref.prId}`;
+  const base = `${ref.projectKey}/${ref.repoSlug}#${ref.prId}`;
+  // Bitbucket keys stay exactly as before; GitHub keys are namespaced so the
+  // two platforms never collide in the dashboard (and github:reader jobs still
+  // group with github: jobs).
+  const platform = ref.platform || "bitbucket";
+  return platform === "bitbucket" ? base : `${platform}:${base}`;
 }
 
 function resultFindings(job) {
@@ -43,10 +48,26 @@ function stripPrPrefix(title) {
   return title.replace(/^Pull request #\d+:\s*/i, "");
 }
 
+/** The browse URL of a PR, per platform (github.com / GHES vs Bitbucket DC). */
+function pullUrlFor(config, ref, prId) {
+  if (ref.platform === "github") {
+    let hostBase = "https://github.com";
+    try {
+      const u = new URL(config?.github?.baseUrl || "https://api.github.com");
+      hostBase = u.host === "api.github.com" ? "https://github.com" : u.origin.replace(/\/api\/v3$/, "");
+    } catch {
+      /* fall back to github.com */
+    }
+    return `${hostBase}/${encodeURIComponent(ref.projectKey)}/${encodeURIComponent(ref.repoSlug)}/pull/${encodeURIComponent(prId)}`;
+  }
+  const baseUrl = config?.bitbucket?.baseUrl?.replace(/\/+$/, "") || "";
+  if (!baseUrl) return null;
+  return `${baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(ref.repoSlug)}/pull-requests/${prId}`;
+}
+
 /** Group summary jobs into per-PR pulls. No network; usable offline. */
 export function buildPullMap(jobs, config) {
   const map = new Map();
-  const baseUrl = config?.bitbucket?.baseUrl?.replace(/\/+$/, "") || "";
   for (const job of jobs) {
     const ref = job.ref;
     if (!ref || ref.projectKey === undefined || ref.repoSlug === undefined || ref.prId == null) continue;
@@ -65,11 +86,12 @@ export function buildPullMap(jobs, config) {
     if (!p) {
       p = {
         key,
+        platform: ref.platform || "bitbucket",
         projectKey: ref.projectKey,
         repoSlug: ref.repoSlug,
         prId: ref.prId,
         app: `${ref.projectKey}/${ref.repoSlug}`,
-        url: baseUrl ? `${baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(ref.repoSlug)}/pull-requests/${ref.prId}` : null,
+        url: pullUrlFor(config, ref, ref.prId),
         reviews: [],
         running: false,
         owner: null, // PR author display name, filled by enrich()
@@ -209,16 +231,33 @@ async function enrich(pulls, client, { ttlMs, concurrency }) {
 /**
  * Summary of every pull request the local jobs reference.
  *
- * @param config runtime config (for job dir + bitbucket base URL)
- * @param client optional BitbucketClient; when omitted only local data is returned
- * @param opts.live  fetch live head state (default true when client is given)
+ * @param config runtime config (for job dir + per-platform base URLs)
+ * @param opts.clients map of platform -> client (bitbucket, github); each pull
+ *        is enriched with its own platform's client. When omitted (or with
+ *        `live=0`) only local job data is returned.
+ * @param opts.client legacy single Bitbucket client (kept for existing callers)
+ * @param opts.live  fetch live head state (default true when a client is given)
  * @param opts.ttlMs cache lifetime for head/res (default HEAD_TTL_MS)
- * @param opts.concurrency max parallel Bitbucket lookups
+ * @param opts.concurrency max parallel lookups per platform
  */
-export async function listPulls(config, { client, live = true, ttlMs = HEAD_TTL_MS, concurrency = 4 } = {}) {
+export async function listPulls(
+  config,
+  { client, clients, live = true, ttlMs = HEAD_TTL_MS, concurrency = 4 } = {},
+) {
   const pulls = buildPullMap(listJobs(config), config);
-  if (live && client && pulls.length) {
-    await enrich(pulls, client, { ttlMs, concurrency });
+  const anyClient = !!client || (!!clients && Object.keys(clients).length > 0);
+  if (live && anyClient && pulls.length) {
+    // Enrich each platform group with its own backend client.
+    const groups = new Map();
+    for (const p of pulls) {
+      const pf = p.platform || "bitbucket";
+      if (!groups.has(pf)) groups.set(pf, []);
+      groups.get(pf).push(p);
+    }
+    for (const [pf, group] of groups) {
+      const c = (clients && clients[pf]) || (client && pf === "bitbucket" ? client : null);
+      if (c) await enrich(group, c, { ttlMs, concurrency });
+    }
   }
-  return { pulls, live: live && !!client };
+  return { pulls, live: live && anyClient };
 }

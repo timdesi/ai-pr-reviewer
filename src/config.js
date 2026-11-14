@@ -172,6 +172,9 @@ export function loadConfig({ envFile } = {}) {
     job: {
       // Safe default: never post to Bitbucket unless explicitly enabled.
       dryRun: !bool("PUBLISH_TO_BITBUCKET", false),
+      // Independent GitHub publish gate: PUBLISH_TO_GITHUB=1 posts to GitHub
+      // even on a Bitbucket-only pipeline (and vice versa).
+      publishToGithub: bool("PUBLISH_TO_GITHUB", false),
       // Authorization allowlist: who may trigger (and who, being added as a PR
       // reviewer, starts an auto-review). Empty = anyone.
       allowedReviewerUsers: list("ALLOWED_REVIEWER_USERS"),

@@ -63,3 +63,33 @@ export function reportBaseUrl({ config, ref, pullRequest }) {
   }
   return config?.bitbucket?.baseUrl || "";
 }
+
+/**
+ * Whether a review of `ref` should publish its comment, per platform:
+ *   - GitHub: PUBLISH_TO_GITHUB (default off)
+ *   - Bitbucket: not dry-run (PUBLISH_TO_BITBUCKET, default off)
+ */
+export function shouldPublish(config, ref) {
+  if (ref?.platform === "github") return !!config?.job?.publishToGithub;
+  return !config?.job?.dryRun;
+}
+
+/**
+ * One live client per *configured* backend (for dashboard lookups). Backends
+ * that are not configured are simply absent — a GitHub-only instance never
+ * instantiates a BitbucketClient. Never throws.
+ */
+export function liveClients(config) {
+  const out = {};
+  try {
+    if (config?.bitbucket?.baseUrl && config?.bitbucket?.token) out.bitbucket = new BitbucketClient(config.bitbucket);
+  } catch {
+    /* not configured — skip */
+  }
+  try {
+    if (config?.github?.token) out.github = new GitHubClient(config.github);
+  } catch {
+    /* not configured — skip */
+  }
+  return out;
+}
