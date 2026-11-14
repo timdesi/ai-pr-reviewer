@@ -1,0 +1,320 @@
+# Changelog — AI PR Reviewer
+
+Release notes for the on-demand AI pull-request reviewer for Bitbucket Data
+Center. Early images were tagged `v1.x`, later releases track the app version
+(`v0.2.y` → `v0.4.x`); both series belong to the same project and are listed
+below in chronological order.
+
+---
+
+## v0.4.2 — 2026-11-13 — Public-comment wording + working Jira acceptance-criteria verdicts
+
+- **Public comment no longer exposes internal reviewer slots:** the consensus
+  summary is author-facing and never names "Reviewer A/B/C/D" or per-agent
+  attribution — plain review language instead. The "Translation & content"
+  anchor drops the "reviewer D" wording; a partial review reads
+  "partial review (N review passes unavailable)". The dashboard's internal
+  report keeps full slot detail.
+- **Jira acceptance-criteria verdicts now actually land:**
+  - Cap for acceptance-criteria text raised (2400 → 6000 chars) so long AC
+    lists reach the consensus whole instead of being cut and hiding the very
+    criteria a PR implements.
+  - `verdictForAc` is exact-first with a bounded numeric fallback, so
+    sub-numbered criteria (`AC3.1`, `AC5.1`) bind to their own bullets and are
+    never hijacked by a parent.
+  - Consensus must emit **one verdict per AC bullet** (ids verbatim, never an
+    empty list when criteria exist), `not_verifiable` instead of omission, and
+    the summary closes with an AC-coverage sentence.
+
+## v0.4.1 — 2026-11-13 — Vision cost + model picker truth + model catalog cleanup
+
+- **Fix for Jira coverage on modern tickets:** acceptance-criteria extraction now
+  also handles Markdown `##` headings (tracker editor output), not just classic
+  `h2.` wiki markup — PR comments on such tickets again show the criteria table.
+- **Vision transcription is now tracked and priced:** screenshot token usage is
+  parsed and billed at the vision model's own rate, shown as a separate
+  **"Vision transcription"** row in the dashboard Costs card. Never mixed into a
+  reviewer's usage.
+- **Models ▾ dialog gained a Vision (screenshots) slot**, persisted like the
+  other defaults. The picker is gated on true image capability, not on the
+  HTTP route: image-capable models only (Claude Haiku 5.5, GPT-6 Luna,
+  Qwen 3.8 27B); text-only models are excluded and rejected.
+- **Model catalog shrink:** two disabled models removed from the bundled
+  config; the catalog is exactly the reachable set.
+
+## v0.4.0 — 2026-11-12 — Reviewer D: language, i18n & translation quality
+
+- **A fourth reviewer joins on translation/content PRs.** A PR is treated as a
+  translation/content PR when any changed file matches a translation path
+  pattern (default `TRANSLATION_PATH_PATTERNS`: `(^|/)i18n/.*\.json`, `.po`,
+  `.pot`; comma-separated regex override).
+- On those PRs **D runs in parallel with A/B/C** (one consensus); on every
+  other PR D is skipped and A/B/C behave exactly as before.
+- D's lens checks **semantic fidelity** to the source locale (`en.json` via the
+  checkout), **terminology/register consistency** across locales, **placeholders**
+  (`{{ var }}`, ICU) and **mechanical i18n defects** (missing/duplicated key,
+  broken nested JSON), plus **untranslated leftovers on changed lines**.
+- New categories `translation`/`i18n`; D's findings render in a dedicated
+  **"Language & content"** PR-comment section. Only HIGH/CRITICAL
+  (meaning changed/harmful, broken placeholder) affect the merge verdict;
+  MEDIUM/LOW are advisory so style feedback can't block a translator.
+- Config: `REVIEWER_MODEL_D` (falls back to `REVIEWER_MODEL_A`),
+  `TRANSLATION_PATH_PATTERNS`. UI: Reviewer D card + model picker.
+
+## v0.3.9 — 2026-11-11 — Vision transcription of PR screenshots
+
+- Reviews now **read images pasted into the PR description or comments**
+  (Bitbucket `attachment:` refs, direct http(s) URLs, or data-URIs) — no longer
+  blindly text-only.
+- A vision-capable model transcribes each image (`VISION_MODEL`, default
+  `aifarm-gpt/gpt-6-luna-2026-09-22`) into a `PR screenshots (transcribed)`
+  block attached to both reviewer and consensus contexts.
+- Works because Bitbucket serves attachments via the REST endpoint with the
+  existing bearer token (no extra SSO).
+- Unreadable/oversized images degrade to an explicit "N screenshots not
+  viewable — ask the author" note, never an error.
+- Flags: `FETCH_PR_IMAGES=1` (default on), `VISION_MODEL`,
+  `VISION_MAX_IMAGES` (6), `VISION_MAX_IMAGE_BYTES` (10 MB),
+  `VISION_FETCH_TIMEOUT_MS`, `VISION_CALL_TIMEOUT_MS`.
+- Comment images are handled like description images — picked up at the next
+  review like any other discussion.
+
+## v0.3.8 — 2026-11-09 — Context-aware dedup + "teach `--force`"
+
+- Same-head dedup is no longer purely head-based: a plain `/ai-review` on the
+  same commit is skipped **only** when there is also **no new human
+  discussion** since the last review. A new author/team comment on an
+  unchanged head is a real re-review trigger.
+- When dedup *does* fire for an explicit `/ai-review`, the bot posts a short
+  threaded reply teaching **`/ai-review --force`** (only with
+  `PUBLISH_TO_BITBUCKET=1`, never in dry-run; auto triggers stay silent).
+
+## v0.3.7 — 2026-11-09 — Context-aware re-reviews
+
+- Reviews now attach the PR's **recent discussion** (human comments + replies
+  to the bot's own review comment, from the Bitbucket activity feed) to both
+  the reviewer and consensus contexts, marked as *author clarifications*.
+- A finding a comment already explains or justifies is resolved
+  (`resolved_previous`) instead of re-raised; re-raised only when the code
+  still contradicts the clarification.
+- Control: `FETCH_PR_DISCUSSION=1` (default on).
+
+## v0.3.5 / v0.3.6 — 2026-11-08 — Dashboard polish
+
+- Center the KPI stats; findings severity chips.
+- Dim 404/unreviewable PRs like merged.
+- Two-decimal cost display; cleaner first-row KPIs.
+
+## v0.3.4 — 2026-11-06 — DeepSeek V4 Flash fix (Reviewer A unblocked)
+
+- Reviewer A (`aifarm-msp/DeepSeek-V4-Flash-0731`) failed every attempt with
+  HTTP 400: the template advertised a larger context window than the model's
+  real deployment caps at **262 144**, so a near-max output request was rejected
+  before any tool call.
+- The model limit is now context 262 144 / output 131 072, matching the real
+  deployment window. Verified in the pod: reviewer A runs to completion.
+
+## v0.3.3 — 2026-11-04 — Release batch
+
+- **Version pin:** review comments/reports now show the image's baked-in
+  `APP_VERSION` (build-arg), fixing reviews that reported a stale version.
+- **Dedup + deliver:** an automatic trigger whose head was already reviewed is
+  skipped; if that review was a held dry-run (UI preview only), it is delivered
+  to Bitbucket when the same head later gets a reviewer.
+- **Allowlist simplify:** auto-review is now ON for every repository by default,
+  off only for repos on `AUTO_REVIEW_OFF_REPOS`. Onboarding a repo =
+  `scripts/reviewer-repo.sh --repo PROJECT/foo --webhook`.
+- **Model cleanup:** two retired Claude variants removed from the config.
+
+## v0.3.2 — 2026-11-01 — SSO sidecar removed; repo onboarding script
+
+- The oauth2-proxy UI SSO sidecar was dropped as unnecessary — back to a simple
+  single-container deployment; `UI_AUTH_*`/`OAUTH2_PROXY_*` code removed.
+- New repositories are onboarded with `scripts/reviewer-repo.sh --repo
+  PROJECT/foo --copy PROJECT/main --webhook`.
+
+## v0.3.1 — Severity color fix
+
+- MEDIUM findings are now a true yellow on the dashboard instead of sharing
+  HIGH's amber.
+
+## v0.2.4 — 2026-10-28 — Reviews on `pr:opened` and `pr:modified`
+
+- A review also starts when a listed reviewer is on a PR that is **opened as a
+  non-draft** (`pr:opened`), or on a **draft when it is marked ready**
+  (`pr:modified`, `previousDraft` true → `draft` false). Drafts opened as drafts
+  do not start one.
+
+## v0.2.3 — 2026-10-27 — Skip merge PRs between branch pairs
+
+- Reviewer-added triggers skip merges between configured branch pairs
+  (`REVIEW_ON_REVIEWER_ADDED_SKIP`), e.g. `develop` ↔ `release/*` and
+  `release/*` ↔ `release/*` — sync merges don't spam reviews.
+
+## v0.2.2 — 2026-10-27 — Reviewer-added triggers
+
+- Reviews start when a configured reviewer is added to a PR (webhook
+  `pr:reviewer:updated`), with per-repository reviewer lists
+  (`REVIEW_ON_REVIEWER_ADDED_BY_REPO`), a default list, and an adder check
+  against `ALLOWED_REVIEWER_USERS`.
+
+## v0.2.1 — Fixes after the first live run
+
+- **Comment draft** is always written (not only when unpublished) — it is
+  exactly the text posted or to be posted.
+- **Artifact caching fixed:** the UI no longer caches a job's artifacts while a
+  review is still running; unsaved Draft-tab edits survive background refreshes
+  (with "Reset to generated").
+- **Jira table noise:** Confluence links, `{}` code-markup leftovers and JSON
+  fragments are dropped when parsing the acceptance-criteria block; the comment
+  shows only judged criteria, same rule as the overview.
+- **Overview/comment parity:** `commentPolicy` is stored in `status.json`; the
+  overview splits findings the same way (full cards + collapsible Minor) and
+  counts match the comment.
+
+## v0.2.0 — Review-quality overhaul
+
+A review of the reviewer agents (A, B, C, consensus) using the 9 saved
+jobs; every issue below was fixed:
+
+- **Shared reviewer template** — prompts were ~70 % duplicated across A/B/C;
+  now one template with distinct, non-overlapping lenses:
+  - **A** — server rules, business logic, false-positive-sensitive checks.
+  - **B** — DTOs, persistence, compatibility.
+  - **C** — security (exploit path required), Jira requirements (in-scope ACs
+    only), test coverage.
+- **Consensus filters, doesn't accumulate** — never more findings than distinct
+  reviewer issues; unverified single-reviewer findings capped at LOW; max 3
+  LOW; new output fields (`category`, `dropped`, `resolved_previous`).
+- **Evidence grounding** — findings cite `evidence`; the consensus re-checks
+  that quoted evidence exists in the diff.
+- **File-aware diff budget** — over the byte budget, whole files are dropped
+  (lockfiles/generated first, then tests, then source), one file may be cut at a
+  line boundary; omitted/cut files listed for the agents.
+- **Comment gate** — the public comment shows in full only findings ≥
+  `COMMENT_MIN_SEVERITY` (default MEDIUM) **and** ≥ `COMMENT_MIN_CONFIDENCE`
+  (0.5); the rest go to a compact **Minor** list and don't drive the verdict.
+- **Two reports** — `comment-draft.md` (public, author-facing) vs
+  `final-report.md` (full internal report incl. notes/audit trail).
+- **Version pinning** — `src/version.js`; `APP_VERSION` env overrides
+  `package.json`; footer + JSON status metadata.
+- **Agents discovered outside `dev/`** — agents now live where opencode finds
+  them from any working directory; no silent fallback to a default agent.
+- **Contexts shipped** — curated per-repo context files + generic per-stack
+  files (Angular, Java/Spring) reach the agents instead of being ignored.
+
+## v1.7 — 2026-10-22 — Per-pull-request dashboard + per-app filter
+
+- **PRs mode** (default): the sidebar groups review runs by pull request, each
+  with a live staleness badge (**new commits** ≫ **up to date** ≫
+  **not reviewed**), last-reviewed SHA, review time, and a `+N commits` hint.
+- **Single job header:** branch → target branch, current head SHA, staleness
+  badge, collapsible "New commits since last review", **↻ Review latest**, and a
+  review-switcher dropdown (flip between that PR's reviews in place).
+- **Per-app filter** above the PR list ("All apps" or `PROJECT/repo`); the
+  **Jobs** toggle returns the flat list.
+- Force-pushed/rebased branches detected (`historyRewritten`).
+- Backing API: `GET /api/pulls?live=1`; head/new-commits resolved from the PR's
+  own commit list and cached in-process.
+
+## v1.6 — 2026-10-22 — Jira ticket context
+
+- `src/jira.js` extracts **linked ticket keys** from the PR title/description,
+  fetches them from the Jira REST API, and appends a **`## Linked Jira
+  tickets`** block (type/status/priority/summary/assignee/description/comments)
+  to the reviewer context, so reviewers judge the change against the ticket's
+  intent and acceptance criteria.
+- Additive and non-fatal: disabled unless `JIRA_ENABLED=1` and a token is
+  present; any fetch failure just skips the block.
+- Enablement required network egress to the tracker host and adding it to
+  `NO_PROXY` so Jira is fetched direct (bypassing the SSO egress proxy).
+
+## v1.5 — UI model switcher + persistence
+
+- `GET /api/models` lists the selectable models (from the runtime opencode
+  config — same source as the cost dashboard) plus the effective A/B/C/consensus
+  assignment; `PUT /api/models` validates and persists; `POST /api/review`
+  accepts a per-review `models` override.
+- The dashboard header gains a **Models ▾** panel: four dropdowns + **Save as
+  defaults** (persisted on the PVC, survive restarts, apply to webhook-triggered
+  runs). Resolution: per-review override > persisted settings > ConfigMap env.
+
+## v1.4 — Native providers + AI Farm MSP
+
+- opencode bundled binary updated so the pod runs the same **native provider
+  packages** as a local install (azure, google-vertex, AI SDK); config template
+  migrated to the native V2 provider shape.
+- The Anthropic provider moved to the native `aifarm` Google-Vertex path.
+- Added the **`aifarm-msp`** provider: z.AI GLM-5.2, DeepSeek-V4-Flash-0731,
+  Qwen-38-27B, authenticated with the existing auth token (no extra key).
+
+## v1.3 — Cost tracking
+
+- The pipeline captures each agent's token usage (input / output / cache read /
+  cache write) from opencode's stream and prices it against the cost metadata
+  in the opencode config (default EUR; `COST_CURRENCY`).
+- Dashboard shows a **Costs (€)** table per reviewer (model, input with cache
+  breakdown, output, total) and a bold TOTAL; each agent card gets a cost line.
+- **GPT-6 Luna usage fix:** the gateway only returns `usage` in a stream when
+  asked via `stream_options.include_usage=true`; the custom provider now
+  injects it, so GPT-6 Luna reports real token counts.
+- **Mandatory verification probe:** reviewer and consensus prompts require at
+  least one `read`/`grep`/`glob` probe against the checkout before finalizing —
+  guarantees per-agent usage is measured and tightens verification depth.
+
+## v1.2 — Web UI overhaul
+
+- *Consensus* and *Reviewers* merged into one tab (A/B/C + Consensus cards);
+  agent cards keep their expanded state across live re-renders (running agents
+  auto-open).
+- Human-friendly model names; redundant *Final report* tab removed (covered by
+  Overview; file stays under Artifacts).
+- *Comment draft* is editable with **Preview** + **Post comment to Bitbucket**
+  (publish API accepts an optional edited text body and persists it back).
+
+## v1.1 — Project context + review checkout + v2 comment rendering
+
+- **Project context** — every review carries a context section from (1) a
+  curated per-repo file (`contexts/PROJECT-repo.md`) and (2) the repo's own
+  `AGENTS.md` fetched at the reviewed head SHA. Marked authoritative and
+  injected into reviewer + consensus contexts. Exists because reviewers only
+  ever see the diff: baseline code and language rules are invisible, and the AI
+  produced false positives without calibration (e.g. flagging a legal
+  `super()` call as a dead guard).
+- **Review checkout** (`REVIEW_CHECKOUT=1`) — shallow-checkout the **reviewed
+  commit** (not the branch tip) into a git worktree so agents read the real
+  tree; one warm bare repo per project with delta fetches; worktrees pruned to
+  `CHECKOUT_KEEP`. Best-effort and non-fatal.
+- **v2 comment rendering** — consensus reports carry a `strengths` array; the
+  renderer produces two files: `comment-draft.md` (public: linked commit
+  heading, verdict line, severity digest, Summary, "What's good", findings with
+  blockquote impact) vs `final-report.md` (full internal incl. notes).
+- Verified run on a real PR: all three reviewers + consensus succeeded,
+  5 earned strengths, 4 LOW / 0 MEDIUM (vs 1 MEDIUM + 7 LOW on the same PR
+  before project context).
+
+## v1.0 — First deployed review pipeline
+
+- On-demand AI PR review as a service on Kubernetes/OpenShift: Bitbucket
+  webhook → fetch PR + diff → **three reviewers in parallel (A/B/C)** + **one
+  consensus agent** → one combined summary comment posted back to the PR.
+- Model assignment, diff-only analysis (before project context/checkout),
+  dry-run vs publish mode, per-job artifacts and a web dashboard.
+- First verified run on a real PR: 0 MEDIUM + 4 LOW.
+
+## v0.8 / v0.9 — First end-to-end runs
+
+- Initial on-demand reviews against a real project PR (diff-only, before the
+  quality overhaul): e.g. 1 MEDIUM + 7 LOW on the pilot PR — the baseline that
+  motivated project context and grounding.
+
+---
+
+## Concept
+
+Built for **Bitbucket Data Center 9.4.x**, published as
+[an on-demand service](https://github.com/timdesi/ai-pr-reviewer): anyone on
+the allowlist triggers a review with an `/ai-review` comment on a PR; a
+reviewer «added» / PR open / draft-marked-ready event can auto-start one as
+well. Reviews are advisory and read-only — the service never opens a PR, never
+modifies code, only posts one summary comment per review.
