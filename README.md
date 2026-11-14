@@ -1,6 +1,6 @@
 # AI PR Reviewer
 
-**On-demand AI code review for Bitbucket Data Center.**
+**On-demand AI code review for Bitbucket Data Center and GitHub.**
 
 Post a comment on a pull request and, a few minutes later, receive one
 clear, human-written review in return: what is good, what is worth fixing,
@@ -37,6 +37,10 @@ per review and works with the review workflow your team already uses.
 - **Manual or automatic triggers.** Start a review with an `/ai-review`
   comment, or automatically when a reviewer is added, a PR is opened, or a
   draft is marked ready.
+- **Two platforms, parallel.** GitHub (`github:owner/repo#N` refs) and
+  Bitbucket Data Center are independent backends on the same server — reviews
+  pick their platform per pull request, so a GitHub-only or Bitbucket-only
+  instance is just the one block filled in.
 
 ## Example review comment
 
@@ -78,7 +82,13 @@ Trigger a review on any pull request:
 ```bash
 npm run review -- ACME/acme-app#5566
 npm run review -- https://bitbucket.example.com/projects/ACME/repos/acme-app/pull-requests/5566
+npm run review -- gh:acme/widgets#42
+npm run review -- https://github.com/acme/widgets/pull/42
 ```
+
+Bare `owner/repo#N` refs default to Bitbucket; a `gh:` prefix (or a
+GitHub `/pull/N` URL) reviews the GitHub PR. Set `GITHUB_TOKEN` in `.env` for
+the GitHub backend (see `.env.example`).
 
 Open the dashboard to watch it run and browse past reviews:
 
@@ -97,7 +107,8 @@ touching a terminal:
 1. Run the container (see `Dockerfile`) or the dashboard server (`npm run ui`).
 2. Add a webhook to `POST /webhooks/bitbucket` with the Bitbucket secret
    (events: `pr:comment:added`, `pr:reviewer:updated`, `pr:opened`,
-   `pr:modified`).
+   `pr:modified`) — or `POST /webhooks/github` with `X-Hub-Signature-256`
+   (events: `issue_comment`, `pull_request`).
 3. Any allowlisted user writes `/ai-review` on a PR — or is added as a
    reviewer — and a review starts automatically.
 
@@ -136,7 +147,7 @@ Architecture and design decisions:
   approves PRs.
 - **Allowlist.** `ALLOWED_REVIEWER_USERS` gates who can trigger a review.
 - **Signed webhooks.** Bitbucket deliveries are verified with an HMAC
-  secret.
+  secret; GitHub deliveries (`X-Hub-Signature-256`) are verified per-platform.
 - **No stale comments.** A review is published only if the head SHA has not
   moved since the review started.
 
@@ -163,7 +174,7 @@ your own Bitbucket, model gateway, and container registry.
 ## Project layout
 
 ```
-src/      application logic (Bitbucket client, pipeline, Jira, vision, webhook, server)
+src/      application logic (platform clients, pipeline, Jira, vision, webhook, server)
 ui/       dashboard (single-page app)
 prompts/  reviewer lens templates, compiled to .opencode/agents/
 contexts/ curated project and stack context fed to every review
