@@ -12,7 +12,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
-import { loadConfig, assertBitbucketConfig } from "./config.js";
+import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
 import { runReview } from "./pipeline.js";
 import { initProxy } from "./proxy.js";
@@ -47,11 +47,13 @@ Usage:
 
 PR reference is either a Bitbucket URL:
   https://host/projects/KEY/repos/slug/pull-requests/ID[/overview]
-or a short form:
-  KEY/slug#ID
+a short form:
+  KEY/slug#ID (Bitbucket)   gh:owner/repo#ID (GitHub)
+or a GitHub URL:
+  https://github.com/owner/repo/pull/ID
 
 Options:
-  --publish   Post the final report as a PR comment on Bitbucket
+  --publish   Post the final report as a PR comment on Bitbucket/GitHub
   --yes       Skip the confirmation prompt when publishing
   --json      Print the machine-readable result as JSON to stdout
   --quiet     Only stderr logs, no fancy summary
@@ -68,7 +70,7 @@ async function confirmPublish() {
   if (!stdin.isTTY) return false;
   const rl = createInterface({ input: stdin, output: stdout });
   const answer = await rl.question(
-    `${ui.yellow("This will post a comment to the real pull request on Bitbucket.")}\n` +
+    `${ui.yellow("This will post a comment to the real pull request.")}\n` +
       `Proceed? ${ui.bold("[y/N]")} `,
   );
   rl.close();
@@ -177,10 +179,12 @@ async function main() {
   let config;
   try {
     config = loadConfig();
-    assertBitbucketConfig(config);
+    assertAnyBackendConfig(config);
   } catch (err) {
     console.error(err.message);
-    console.error("Copy .env.example to .env and fill in BITBUCKET_BASE_URL / BITBUCKET_API_TOKEN.");
+    console.error(
+      "Copy .env.example to .env and fill in BITBUCKET_BASE_URL / BITBUCKET_API_TOKEN (Bitbucket) or GITHUB_TOKEN (GitHub).",
+    );
     process.exitCode = 2;
     return;
   }

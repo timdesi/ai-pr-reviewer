@@ -86,6 +86,11 @@ function commitLink(report, ref, baseUrl) {
   if (!sha) return null;
   const label = shortSha(sha);
   if (baseUrl && ref?.projectKey && ref?.repoSlug) {
+    // GitHub links the commit on the repo's web URL; Bitbucket uses its REST
+    // server origin. The branch is additive — Bitbucket PRs never take it.
+    if (ref?.platform === "github") {
+      return { label, href: `${baseUrl}/commit/${encodeURIComponent(sha)}` };
+    }
     const url =
       `${baseUrl}/projects/${encodeURIComponent(ref.projectKey)}` +
       `/repos/${encodeURIComponent(ref.repoSlug)}/commits/${encodeURIComponent(sha)}`;

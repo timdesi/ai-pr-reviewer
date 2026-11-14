@@ -1,0 +1,65 @@
+// Platform client selection.
+//
+// Bitbucket and GitHub are independent, optional backends (parallel backends,
+// not a mode switch). The platform is decided per review ref:
+//   - ref.platform === "github"  -> GitHubClient (config.github)
+//   - anything else             -> BitbucketClient (config.bitbucket)
+// So the same server/CLI serves whichever backends it has credentials for.
+
+import { BitbucketClient } from "./bitbucket.js";
+import { GitHubClient } from "./github.js";
+
+/** The config block for a ref's platform ("github" -> github, else bitbucket). */
+export function backendConfig(config, ref) {
+  return ref?.platform === "github" ? config.github : config.bitbucket;
+}
+
+/**
+ * Build the client for a review ref. The bitbucket branch is only taken for
+ * non-GitHub refs, so a GitHub-only instance (no BITBUCKET_*) still works.
+ */
+export function createReviewClient(config, ref) {
+  if (ref?.platform === "github") {
+    return new GitHubClient(config.github);
+  }
+  return new BitbucketClient(config.bitbucket);
+}
+
+/**
+ * The bot identity used to filter our own comments out of the PR discussion /
+ * screenshots context: GITHUB_USERNAME for GitHub refs, BITBUCKET_USERNAME
+ * otherwise (a GitHub-only instance has an empty list -> unknown bot, the
+ * heuristic length guard keeps working).
+ */
+export function botUsernamesOf(config, ref) {
+  const name = ref?.platform === "github" ? config?.github?.username : config?.bitbucket?.username;
+  return [name].filter(Boolean);
+}
+
+/**
+ * The public URL for a published comment on a PR.
+ *   - GitHub: the PR's html_url plus the `#issuecomment-<id>` anchor.
+ *   - Bitbucket: the server URL plus the `?comment=<id>` deep link.
+ */
+export function prCommentUrl({ ref, pullRequest, client, commentId }) {
+  if (ref?.platform === "github" && pullRequest?.htmlUrl) {
+    const base = String(pullRequest.htmlUrl).split(/[?#]/)[0];
+    return `${base}#issuecomment-${commentId}`;
+  }
+  const baseUrl = client?.baseUrl || "";
+  return `${baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(
+    ref.repoSlug,
+  )}/pull-requests/${ref.prId}?comment=${commentId}`;
+}
+
+/**
+ * The "base URL" handed to report rendering. Bitbucket = the server origin
+ * (used to build /projects/.../commits links); GitHub = the repo's web URL
+ * (used to build /commit/<sha> links).
+ */
+export function reportBaseUrl({ config, ref, pullRequest }) {
+  if (ref?.platform === "github") {
+    return String(pullRequest?.htmlUrl || "").replace(/\/pull\/\d+.*$/i, "");
+  }
+  return config?.bitbucket?.baseUrl || "";
+}

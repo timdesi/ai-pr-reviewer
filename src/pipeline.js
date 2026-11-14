@@ -9,7 +9,7 @@
 import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { BitbucketClient } from "./bitbucket.js";
+import { createReviewClient, botUsernamesOf, prCommentUrl, reportBaseUrl } from "./clients.js";
 import { buildReviewerContext, buildConsensusContext, loadProjectContext } from "./context.js";
 import { prepareCheckout, cleanupCheckout } from "./checkout.js";
 import { runAgent } from "./opencode.js";
@@ -87,7 +87,7 @@ function rollupAgentCost(agentState, attempts) {
 function noop() {}
 
 export async function runReview({ ref, config, options = {} }) {
-  const client = new BitbucketClient(config.bitbucket);
+  const client = createReviewClient(config, ref);
   const emit = options.emit || noop;
   const onStage = options.onStage || noop;
   const jobsDir = config.dirs.jobs;
@@ -275,7 +275,7 @@ export async function runReview({ ref, config, options = {} }) {
     discussionBlock = await loadDiscussion({
       client,
       ref,
-      botUsernames: [config.bitbucket.username].filter(Boolean),
+      botUsernames: botUsernamesOf(config, ref),
       reviewCommentId,
       activities: activities ?? undefined,
     });
@@ -356,21 +356,18 @@ export async function runReview({ ref, config, options = {} }) {
   try {
     onStage("review");
     fire("stage", { stage: "review" });
-    const reviewerOutcomes = await Promise.all(
-      activeDefs.map((def) =>
-        runReviewerWithRetries(config, {
-          ...def,
-          model: effectiveModels[def.field],
-          contextFile,
-          cwd: agentCwd,
-          jobDir,
-          fire,
-          status,
-          flushStatus,
-          prices,
-        }),
-      ),
-    );
+    const reviewerOutcomes = await runReviewers({
+      activeDefs,
+      config,
+      effectiveModels,
+      contextFile,
+      agentCwd,
+      jobDir,
+      fire,
+      status,
+      flushStatus,
+      prices,
+    });
 
     const failed = reviewerOutcomes.filter((r) => !r.ok);
     for (const f of failed) {
@@ -454,7 +451,7 @@ export async function runReview({ ref, config, options = {} }) {
       report: consensus.report,
       ref,
       pullRequest,
-      baseUrl: config.bitbucket.baseUrl,
+      baseUrl: reportBaseUrl({ config, ref, pullRequest }),
       jiraTickets: jira.tickets, // Linked-ticket context (ACs) for the report/comment appendix
       degraded,
       policy: {
@@ -512,6 +509,35 @@ export async function runReview({ ref, config, options = {} }) {
   } finally {
     await cleanupCheckout({ config, ref });
   }
+}
+
+// Run the active reviewers with bounded parallelism. REVIEWER_PARALLELISM
+// (config.review.parallelism): 0/unset = all at once (the historical default);
+// 1 = one at a time (for small hosts); N = at most N at a time. Only the
+// scheduling changes — every reviewer-def option stays identical.
+async function runReviewers({ activeDefs, config, effectiveModels, contextFile, agentCwd, jobDir, fire, status, flushStatus, prices }) {
+  const task = (def) =>
+    runReviewerWithRetries(config, {
+      ...def,
+      model: effectiveModels[def.field],
+      contextFile,
+      cwd: agentCwd,
+      jobDir,
+      fire,
+      status,
+      flushStatus,
+      prices,
+    });
+  const limit = Number(config?.review?.parallelism) || 0;
+  if (limit > 0) {
+    const outcomes = [];
+    for (let i = 0; i < activeDefs.length; i += limit) {
+      const batch = activeDefs.slice(i, i + limit);
+      outcomes.push(...(await Promise.all(batch.map(task))));
+    }
+    return outcomes;
+  }
+  return Promise.all(activeDefs.map(task));
 }
 
 async function runReviewerWithRetries(config, { key, agent, label, model, contextFile, cwd, jobDir, fire, status, flushStatus, prices }) {
@@ -711,9 +737,7 @@ async function publishComment({ client, ref, pullRequest, report, reportMarkdown
     published: true,
     stale: false,
     commentId,
-    url: `${client.baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(
-      ref.repoSlug,
-    )}/pull-requests/${ref.prId}?comment=${commentId}`,
+    url: prCommentUrl({ ref, pullRequest, client, commentId }),
   };
 }
 
