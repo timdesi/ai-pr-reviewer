@@ -17,16 +17,24 @@ while read -r _local _lsha _remote _rsha; do
       echo "pre-push: banned text in commit message(s) of $range" >&2
       exit 1
     fi
-    if git diff "$_rsha" "$_lsha" | grep -qEi "$BANNED"; then
+    # scan the diff, excluding the hook's own definition and the LICENSE
+    # (the license deliberately names the copyright holder, see below)
+    if git diff "$_rsha" "$_lsha" -- . \
+         ':(exclude).githooks/pre-push' ':(exclude)LICENSE' \
+       | grep -qEi "$BANNED"; then
       echo "pre-push: banned text in diff of $range" >&2
       exit 1
     fi
   fi
 
   # full-tree scan of the pushed HEAD (skip the hook's own definition + binary artifacts)
+  # LICENSE is excluded deliberately: an MIT license names the copyright holder
+  # (an author name may match the banned list, which exists to catch internal
+  # identity/network leaks — not a public project's own author line).
   if git grep -InEi "$BANNED" "$_lsha" -- . \
      ':(exclude)*.pdf' ':(exclude)*.odp' ':(exclude)*.pptx' \
      ':(exclude)SCRUB-PLAN.md' ':(exclude).githooks/pre-push' \
+     ':(exclude)LICENSE' \
      >/dev/null 2>&1; then
     echo "pre-push: banned text in pushed tree ($_lsha)" >&2
     exit 1
