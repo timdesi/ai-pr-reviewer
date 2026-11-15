@@ -77,6 +77,19 @@ function fakeClient({ heads = {}, prCommits = {}, branches = {}, meta = {} }) {
 
 // --- tests ------------------------------------------------------------------
 
+test("keyOf namespaces GitHub so it can never collide with a Bitbucket key", () => {
+  // Bitbucket keys stay exactly as before.
+  assert.equal(keyOf({ projectKey: "ACME", repoSlug: "acme-app", prId: 42 }), "ACME/acme-app#42");
+  assert.equal(keyOf({ projectKey: "github", repoSlug: "acme-app", prId: 42 }), "github/acme-app#42");
+  // GitHub refs are prefixed — the same owner/repo#N on the other platform is distinct.
+  assert.equal(keyOf({ projectKey: "acme", repoSlug: "widgets", prId: 3, platform: "github" }), "github:acme/widgets#3");
+  assert.notEqual(
+    keyOf({ projectKey: "acme", repoSlug: "widgets", prId: 3, platform: "github" }),
+    keyOf({ projectKey: "acme", repoSlug: "widgets", prId: 3 }),
+  );
+  assert.equal(keyOf(null), null);
+});
+
 test("listPulls(offline) groups jobs by PR and keeps per-review history", async () => {
   const cfg = freshCfg();
   const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5580 };

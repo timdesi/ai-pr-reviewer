@@ -38,18 +38,22 @@ const CORE_REVIEWER_DEFS = REVIEWER_DEFS.filter((d) => d.key !== "d");
 const MIN_REVIEWERS = 2;
 
 export function sanitize(s) {
-  return String(s).replace(/[^A-Za-z0-9._-]+/g, "-");
+  // `@` is preserved so a platform-namespace marker (github@…) survives; it
+  // cannot appear in a Bitbucket project key or repo slug, so the marker can
+  // never be produced by a Bitbucket name.
+  return String(s).replace(/[^A-Za-z0-9._@-]+/g, "-");
 }
 
 /**
  * Deterministic job-name prefix for a ref (`<proj>-<repo>-PR<N>-`). GitHub is
- * namespaced (`github-…`) so a GitHub owner/repo never shares a job namespace
- * with a Bitbucket project/repo of the same lowercased name; Bitbucket
+ * namespaced with `github@…` (mirroring the checkout cache separator) so a
+ * GitHub owner/repo never shares a job namespace with a Bitbucket project/repo
+ * whose key is literally `GITHUB` (or lowercases to `github`); Bitbucket
  * prefixes are byte-for-byte unchanged (existing job dirs stay readable).
  */
 export function jobPrefixFor(ref) {
   const base = `${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-`;
-  return sanitize(ref?.platform === "github" ? `github-${base}` : base);
+  return sanitize(ref?.platform === "github" ? `github@${base}` : base);
 }
 
 // Attach token usage + computed cost to a finished attempt (from runAgent).
