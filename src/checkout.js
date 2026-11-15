@@ -100,7 +100,7 @@ function lockDir({ workspaceRoot, ref }) {
  * never be produced by a Bitbucket one. Bitbucket names are byte-for-byte
  * unchanged (existing caches stay valid).
  */
-function repoNameOf(ref) {
+export function repoNameOf(ref) {
   const slug = `${String(ref?.projectKey).toLowerCase()}-${String(ref?.repoSlug).toLowerCase()}`;
   return ref?.platform === "github" ? `github@${slug}` : slug;
 }

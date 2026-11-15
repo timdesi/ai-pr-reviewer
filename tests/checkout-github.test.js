@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { scmUrl, basicAuthUrl, prepareCheckout } from "../src/checkout.js";
+import { scmUrl, basicAuthUrl, repoNameOf, prepareCheckout } from "../src/checkout.js";
 
 const ghRef = { projectKey: "acme", repoSlug: "widgets", prId: 42, platform: "github" };
 
@@ -126,4 +126,21 @@ test("prepareCheckout is hermetic: the bare repo and lock are keyed by owner/rep
   assert.equal(res.ok, true, res.reason);
   const bare = path.join(config.dirs.workspaceRoot, "github@acme-widgets.git");
   assert.ok(existsSync(path.join(bare, "HEAD")), `bare repo should exist at ${bare}`);
+});
+
+test("repoNameOf never collides between the GitHub and Bitbucket namespaces", () => {
+  // GitHub is namespaced+separated with @ (acme/widgets -> github@acme-widgets).
+  assert.equal(repoNameOf({ projectKey: "acme", repoSlug: "widgets", platform: "github" }), "github@acme-widgets");
+  // Bitbucket stays byte-for-byte as `key-repo` (existing caches stay valid).
+  assert.equal(repoNameOf({ projectKey: "ACME", repoSlug: "widgets" }), "acme-widgets");
+  // Worst collision: a Bitbucket project key literally `GITHUB` folds to the
+  // `github-` prefix, but the `@` separator means the cache handle can never
+  // equal a GitHub handle of the same names.
+  assert.equal(repoNameOf({ projectKey: "GITHUB", repoSlug: "acme-widgets" }), "github-acme-widgets");
+  assert.notEqual(
+    repoNameOf({ projectKey: "GITHUB", repoSlug: "acme-widgets" }),
+    repoNameOf({ projectKey: "acme", repoSlug: "widgets", platform: "github" }),
+  );
+  // Case is folded on both sides, so the distinctness comes from the separator.
+  assert.equal(repoNameOf({ projectKey: "GitHub", repoSlug: "Widgets", platform: "github" }), "github@github-widgets");
 });

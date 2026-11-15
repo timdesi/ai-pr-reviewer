@@ -252,18 +252,24 @@ export class GitHubClient {
   }
 
   /**
-   * The PR's own commits, newest-first (GitHub returns them in this order).
-   * This is the reliable way to find "new commits since a review".
+   * The PR's own commits, newest-first. GitHub serves them in commit order
+   * (oldest first), so we sort explicitly by committer timestamp — relying on
+   * the wire order could invert the "new commits since a review" slice when
+   * commits share a timestamp.
    */
   async getPullRequestCommits({ projectKey, repoSlug, prId }) {
     const p = `${this.prBase({ projectKey, repoSlug, prId })}/commits`;
     const values = await this.getAllPages(p, { per_page: 100 });
-    return values.map((c) => ({
-      id: c?.sha ?? null,
-      message: c?.commit?.message || "",
-      author: c?.author?.login || c?.commit?.author?.name || null,
-      timestamp: c?.commit?.committer?.date ? Date.parse(c.commit.committer.date) : null,
-    }));
+    return values
+      .map((c) => ({
+        id: c?.sha ?? null,
+        message: c?.commit?.message || "",
+        author: c?.author?.login || c?.commit?.author?.name || null,
+        timestamp: c?.commit?.committer?.date ? Date.parse(c.commit.committer.date) : null,
+      }))
+      // Newest first; null timestamps (rare) sort last. Stable, so equal
+      // timestamps keep the API's relative order.
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
   }
 
   /** Commits that landed in `from` but not in `to` (both SHA refs). */
@@ -324,7 +330,13 @@ export class GitHubClient {
   /** Top-level PR comments (issue comments), flattened to comment-like objects. */
   async getComments({ projectKey, repoSlug, prId }) {
     const p = `/repos/${encodeURIComponent(projectKey)}/${encodeURIComponent(repoSlug)}/issues/${encodeURIComponent(prId)}/comments`;
-    const comments = await this.getAllPages(p, { per_page: 100 }).catch(() => []);
+    const comments = await this.getAllPages(p, { per_page: 100 }).catch((err) => {
+      // A 5xx / rate-limit must not look like "no comments" — log it so the
+      // reason is discoverable. getComments is non-fatal by contract, so we
+      // still fall back to an empty list.
+      log.warn(`github.getComments failed for ${projectKey}/${repoSlug}#${prId}: ${err?.message || err}`);
+      return [];
+    });
     return comments.map((c) => ({
       id: c?.id ?? null,
       text: c?.body ?? "",
