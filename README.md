@@ -190,3 +190,5 @@ The full history — from the first diff-only reviews to context-aware
 re-reviews, screenshot transcription, Jira acceptance-criteria verdicts,
 and Reviewer D — is in
 [`CHANGELOG.md`](CHANGELOG.md).
+
+Webhook live test - temporary.
