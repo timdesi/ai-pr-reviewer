@@ -90,6 +90,22 @@ ready.
   review is delivered to the PR when it was not yet posted (auto triggers stay
   silent; a plain `/ai-review` teaches `--force` in a short reply).
 
+### 2.4 GitHub pull requests (parallel backend)
+
+GitHub and Bitbucket are **independent backends** on the same server; every
+review picks its platform from the PR's reference, so nothing is a "mode".
+
+- GitHub PRs are reviewed exactly like Bitbucket PRs: `/ai-review` comments and
+  the automatic triggers (opened, draft marked ready, reviewer requested) all
+  work — with the **same** allowlist, and the per-repo opt-out list is
+  `GITHUB_AUTO_REVIEW_OFF_REPOS` (owner/repo, e.g. `acme/widgets`).
+- A GitHub review needs `GITHUB_TOKEN` (classic PAT; App/installation tokens
+  work unchanged) and, for webhooks, `GITHUB_WEBHOOK_SECRET` configured on the
+  `POST /webhooks/github` endpoint (`X-Hub-Signature-256`; the unsigned `ping`
+  test event is always acknowledged).
+- Publishing is gated per platform: `PUBLISH_TO_GITHUB=1` posts reviews to
+  GitHub, independent of `PUBLISH_TO_BITBUCKET`.
+
 ---
 
 ## 3. Reading the review comment
@@ -196,7 +212,13 @@ Trigger a review with a PR URL or `KEY/slug#ID`:
 ```bash
 npm run review -- ACME/acme-app#5566
 npm run review -- https://host/projects/ACME/repos/acme-app/pull-requests/5566
+npm run review -- gh:acme/widgets#42               # GitHub (owner/repo)
+npm run review -- https://github.com/acme/widgets/pull/42
 ```
+
+Bare `owner/repo#N` refs default to Bitbucket; `gh:`/GitHub-URL forms select
+the GitHub backend. GitHub Enterprise Server is supported via
+`GITHUB_API_BASE_URL` (e.g. `https://ghe.example.com/api/v3`).
 
 Post the report as a real PR comment (opt-in per run):
 
@@ -208,7 +230,7 @@ Options:
 
 | Option | Effect |
 | --- | --- |
-| `--publish` | Post the final report as a PR comment on Bitbucket |
+| `--publish` | Post the final report as a PR comment on the PR's platform (Bitbucket or GitHub) |
 | `--yes` / `-y` | Skip the confirmation prompt when publishing |
 | `--json` | Print the machine-readable result as JSON |
 | `--quiet` | Only stderr logs, no fancy summary |
@@ -255,8 +277,10 @@ switch models per slot from the dashboard UI (persisted overrides).
 
 ### 6.1 Webhook setup (server)
 
-The dashboard server (`npm run ui`) also serves `POST /webhooks/bitbucket` on
-the same port. Point a repository/project webhook at
+The dashboard server (`npm run ui`) also serves `POST /webhooks/bitbucket` and
+`POST /webhooks/github` on the same port.
+
+**Bitbucket** — point a repository/project webhook at
 `https://<host>:<port>/webhooks/bitbucket` with:
 
 - **Events:** `pr:comment:added`, `pr:reviewer:updated`, `pr:opened`,
@@ -265,6 +289,17 @@ the same port. Point a repository/project webhook at
   a wrong/missing `X-Hub-Signature` are rejected (401).
 - The handler responds immediately (200/202) and enqueues the review; it never
   blocks on model execution.
+
+**GitHub** — a repository or organization webhook at
+`https://<host>:<port>/webhooks/github` with:
+
+- **Events:** `issue_comment` (created, for `/ai-review`) and `pull_request`
+  (opened, ready_for_review, review_requested).
+- **Secret:** the same `GITHUB_WEBHOOK_SECRET` (payloads must carry a valid
+  `X-Hub-Signature-256`, HMAC-SHA256). While a secret is set, the unsigned
+  `ping` test event is always acknowledged. **Empty secret = the endpoint is
+  disabled** (every delivery returns 403, fail closed) — never "unsigned
+  allowed".
 
 ---
 

@@ -7,6 +7,33 @@ below in chronological order.
 
 ---
 
+## Unreleased — GitHub backend (parallel platform support)
+
+- **GitHub is now a first-class, *parallel* backend** alongside Bitbucket Data
+  Center — not a mode switch. A review picks its platform from the PR reference:
+  `github:owner/repo#N`, a `gh:` prefix, or a GitHub `/pull/N` URL selects
+  GitHub; everything else stays on Bitbucket (bare `owner/repo#N` unaffected).
+- **New `GitHubClient`** (`src/github.js`) mirrors the Bitbucket client surface
+  and returns normalized PR/activity/change shapes, so the pipeline, context,
+  discussion and report steps need no platform branches (Link-header
+  pagination, `vnd.github.diff`, GHES support via `GITHUB_API_BASE_URL`).
+- **GitHub webhooks:** `POST /webhooks/github` verifies `X-Hub-Signature-256`
+  (unsigned `ping` always acknowledged) and triggers on `/ai-review` comments,
+  `pull_request` opened / ready_for_review / review_requested — with the same
+  allowlist (`ALLOWED_REVIEWER_USERS`), per-repo off list
+  (`GITHUB_AUTO_REVIEW_OFF_REPOS`) and branch-pair skip
+  (`REVIEW_ON_REVIEWER_ADDED_SKIP`) semantics as Bitbucket; drafts wait until
+  marked ready.
+- **Independent publish gates:** `PUBLISH_TO_GITHUB=1` posts comments to
+  GitHub (default 0), independent of `PUBLISH_TO_BITBUCKET`. GitHub publishes
+  via the comment's own `html_url`; repo root links are per-platform.
+- **Dashboard grouping is platform-aware:** pull keys are namespaced
+  (`github:owner/repo#N`) so the platforms never collide, and each PR is
+  enriched with its own platform's client (head SHA, new commits, state —
+  `MERGED`/`CLOSED` GitHub PRs are dimmed like merged/declined Bitbucket PRs).
+- **Operational knobs:** `REVIEWER_PARALLELISM` (0 = parallel default, 1 =
+  strictly serial for small hosts) and a GitHub-only `.env` profile for the VM.
+
 ## v0.4.2 — 2026-11-13 — Public-comment wording + working Jira acceptance-criteria verdicts
 
 - **Public comment no longer exposes internal reviewer slots:** the consensus

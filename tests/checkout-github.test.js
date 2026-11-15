@@ -1,0 +1,161 @@
+// Checkout for GitHub refs (src/checkout.js): the clone URL is the GitHub
+// host (github.com or GHES), and prepareCheckout routes to the `github:` config
+// block without touching the Bitbucket path (which its own tests cover).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+
+import { scmUrl, basicAuthUrl, checkoutUsername, repoNameOf, prepareCheckout } from "../src/checkout.js";
+
+const ghRef = { projectKey: "acme", repoSlug: "widgets", prId: 42, platform: "github" };
+
+function tempDir(prefix = "ckxgh-test-") {
+  return mkdtempSync(path.join(tmpdir(), prefix));
+}
+
+function git(cwd, args) {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(" ")} exited ${r.status}: ${(r.stderr || "").trim().slice(0, 300)}`);
+  }
+  return r.stdout.trim();
+}
+
+function makeRemote() {
+  const src = tempDir();
+  git(src, ["init", "-b", "main"]);
+  writeFileSync(path.join(src, "a.txt"), "v1");
+  git(src, ["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+  git(src, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c1"]);
+  const sha1 = git(src, ["rev-parse", "HEAD"]);
+  writeFileSync(path.join(src, "a.txt"), "v2");
+  git(src, ["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+  git(src, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c2"]);
+  const sha2 = git(src, ["rev-parse", "HEAD"]);
+  const remote = tempDir("ckxgh-remote-");
+  rmSync(remote, { recursive: true });
+  git(tmpdir(), ["clone", "--bare", src, remote]);
+  rmSync(src, { recursive: true, force: true });
+  return { remote, sha1, sha2 };
+}
+
+function baseConfig(overrides = {}) {
+  const workspaceRoot = tempDir();
+  return {
+    checkout: { enabled: true, keep: 2 },
+    github: { baseUrl: "https://api.github.com", token: "tok", verifyTls: false },
+    dirs: { workspaceRoot },
+    ...overrides,
+  };
+}
+
+test("scmUrl builds the github.com clone URL (owner/repo preserved)", () => {
+  assert.equal(
+    scmUrl({ baseUrl: "https://api.github.com", projectKey: "acme", repoSlug: "widgets", platform: "github" }),
+    "https://github.com/acme/widgets.git",
+  );
+});
+
+test("scmUrl builds a GitHub Enterprise Server clone URL from its API base", () => {
+  assert.equal(
+    scmUrl({ baseUrl: "https://ghe.example.com/api/v3", projectKey: "acme", repoSlug: "widgets", platform: "github" }),
+    "https://ghe.example.com/acme/widgets.git",
+  );
+});
+
+test("scmUrl keeps the Bitbucket layout when platform is not github", () => {
+  assert.equal(
+    scmUrl({ baseUrl: "https://bitbucket.example.com", projectKey: "ACME", repoSlug: "acme-app" }),
+    "https://bitbucket.example.com/scm/acme/acme-app.git",
+  );
+});
+
+test("basicAuthUrl leaves an empty username empty (Bitbucket parity, no fallback here)", () => {
+  // The x-token-auth fallback is scoped to checkoutUsername(GitHub) — basicAuthUrl
+  // itself must keep an empty username empty so the Bitbucket path is unchanged
+  // when BITBUCKET_USERNAME is unset.
+  const url = basicAuthUrl("https://bitbucket.example.com/scm/acme/acme-app.git", "", "tok");
+  const u = new URL(url);
+  assert.equal(u.username, "");
+  assert.equal(u.password, "tok");
+  assert.equal(u.host, "bitbucket.example.com");
+});
+
+test("basicAuthUrl keeps an explicit username and encodes creds safely", () => {
+  const u = new URL(basicAuthUrl("https://github.com/acme/widgets.git", "mybot", "tok"));
+  assert.equal(u.username, "mybot");
+  assert.equal(u.password, "tok");
+});
+
+test("checkoutUsername scopes the x-token-auth fallback to GitHub only", () => {
+  // GitHub + no bot username -> the conventional token-user.
+  assert.equal(checkoutUsername("github", ""), "x-token-auth");
+  assert.equal(checkoutUsername("github", undefined), "x-token-auth");
+  assert.equal(checkoutUsername("github", "mybot"), "mybot");
+  // Bitbucket (and default) keep their username byte-for-byte — empty stays empty.
+  assert.equal(checkoutUsername("bitbucket", ""), "");
+  assert.equal(checkoutUsername("bitbucket", "mybot"), "mybot");
+  assert.equal(checkoutUsername(undefined, ""), "");
+  assert.equal(checkoutUsername(undefined, "mybot"), "mybot");
+});
+
+test("prepareCheckout fetches a GitHub ref through the github config into a worktree", async () => {
+  const { remote, sha2 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+  assert.ok(path.basename(res.dir).includes(sha2.slice(0, 8)), `dir ${res.dir} should be named by sha8`);
+  // The worked tree holds the reviewed commit (v2); `.git` is a gitlink to the
+  // bare repo (a linked worktree), so no direct HEAD read here.
+  assert.equal(readFileSync(path.join(res.dir, "a.txt"), "utf8"), "v2");
+  assert.ok(existsSync(path.join(res.dir, ".git")), "linked worktree has a .git gitlink");
+});
+
+test("prepareCheckout refuses a GitHub ref when no github backend is configured", async () => {
+  const { remote, sha2 } = makeRemote();
+  // Bitbucket-only config: a github ref must not silently clone from Bitbucket.
+  const config = { checkout: { enabled: true, keep: 2 }, bitbucket: { baseUrl: "https://bb.example.com", token: "t", verifyTls: false }, dirs: { workspaceRoot: tempDir() } };
+  const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
+  assert.equal(res.ok, false);
+  assert.match(res.reason, /github backend not configured/);
+});
+
+test("prepareCheckout refuses a GitHub ref when the github block has an empty token (loadConfig shape)", async () => {
+  const { remote, sha2 } = makeRemote();
+  // loadConfig always builds config.github (token "" without GITHUB_TOKEN), so
+  // the guard must key on the token, not on the object's presence.
+  const config = { checkout: { enabled: true, keep: 2 }, github: { baseUrl: "https://api.github.com", token: "", verifyTls: false }, dirs: { workspaceRoot: tempDir() } };
+  const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
+  assert.equal(res.ok, false);
+  assert.match(res.reason, /GITHUB_TOKEN/);
+});
+
+test("prepareCheckout is hermetic: the bare repo and lock are keyed by owner/repo", async () => {
+  const { remote, sha2 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+  const bare = path.join(config.dirs.workspaceRoot, "github@acme-widgets.git");
+  assert.ok(existsSync(path.join(bare, "HEAD")), `bare repo should exist at ${bare}`);
+});
+
+test("repoNameOf never collides between the GitHub and Bitbucket namespaces", () => {
+  // GitHub is namespaced+separated with @ (acme/widgets -> github@acme-widgets).
+  assert.equal(repoNameOf({ projectKey: "acme", repoSlug: "widgets", platform: "github" }), "github@acme-widgets");
+  // Bitbucket stays byte-for-byte as `key-repo` (existing caches stay valid).
+  assert.equal(repoNameOf({ projectKey: "ACME", repoSlug: "widgets" }), "acme-widgets");
+  // Worst collision: a Bitbucket project key literally `GITHUB` folds to the
+  // `github-` prefix, but the `@` separator means the cache handle can never
+  // equal a GitHub handle of the same names.
+  assert.equal(repoNameOf({ projectKey: "GITHUB", repoSlug: "acme-widgets" }), "github-acme-widgets");
+  assert.notEqual(
+    repoNameOf({ projectKey: "GITHUB", repoSlug: "acme-widgets" }),
+    repoNameOf({ projectKey: "acme", repoSlug: "widgets", platform: "github" }),
+  );
+  // Case is folded on both sides, so the distinctness comes from the separator.
+  assert.equal(repoNameOf({ projectKey: "GitHub", repoSlug: "Widgets", platform: "github" }), "github@github-widgets");
+});

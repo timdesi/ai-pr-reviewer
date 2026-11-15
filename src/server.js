@@ -35,16 +35,18 @@ import http from "node:http";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
-import { loadConfig, assertBitbucketConfig } from "./config.js";
+import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
-import { runReview, listJobs, readJobSummary, readJobArtifacts, sanitize } from "./pipeline.js";
+import { runReview, listJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
 import { listPulls, clearPullCache } from "./pulls.js";
 import { computeStats } from "./stats.js";
 import { parseWebhookRequest, verifySignature, isUnsignedDiagnostic, isForceReview } from "./webhook.js";
+import { parseGitHubWebhookRequest } from "./webhook-github.js";
 import { findPreviousReview, alreadyReviewedAt } from "./previous.js";
 import { hasNewHumanDiscussion, previousReviewCommentId } from "./discussion.js";
 import { initProxy } from "./proxy.js";
 import { BitbucketClient } from "./bitbucket.js";
+import { createReviewClient, botUsernamesOf, shouldPublish, prCommentUrl, liveClients } from "./clients.js";
 import { defaultPriceCandidates, listAvailableModels } from "./costs.js";
 import { writeModelAssignments } from "./models.js";
 import { log } from "./log.js";
@@ -65,7 +67,7 @@ const MIME = {
 // edited text) and by the webhook dedup path (an already-reviewed head is
 // delivered rather than silently dropped). Returns `{ published:true,
 // commentId, url }` on success, or `{ published:false, stale?, error? }`.
-async function publishReview(config, jobName, { customText } = {}) {
+async function publishReview(config, jobName, { customText, client } = {}) {
   const detail = readJobSummary(config, jobName);
   const draftPath =
     detail.paths?.commentDraft && existsSync(detail.paths.commentDraft)
@@ -81,16 +83,18 @@ async function publishReview(config, jobName, { customText } = {}) {
   }
   const markdown = customText || readFileSync(draftPath ?? reportPath, "utf8");
   const consensus = detail.consensus ?? {};
-  const client = new BitbucketClient(config.bitbucket);
   const ref = detail.ref;
-  const current = await client.getPullRequest(ref);
+  // Platform-selected client (defaults to the bitbucket one via the ref).
+  const bk = client || createReviewClient(config, ref);
+  const current = await bk.getPullRequest(ref);
   const currentSha = current.fromRef?.latestCommit || current.fromRef?.id;
   const reviewedSha = consensus.reviewed_sha || detail.reviewedSha;
   if (currentSha && reviewedSha && currentSha !== reviewedSha) {
     return { published: false, stale: true, error: `PR head changed (${currentSha.slice(0, 8)} != ${reviewedSha.slice(0, 8)}); not publishing` };
   }
-  const comment = await client.postPullRequestComment({ ...ref, text: markdown });
-  const url = `${config.bitbucket.baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(ref.repoSlug)}/pull-requests/${ref.prId}?comment=${comment.id}`;
+  const comment = await bk.postPullRequestComment({ ...ref, text: markdown });
+  // GitHub returns the comment's real URL; Bitbucket deep-links via ?comment=.
+  const url = comment?.html_url || prCommentUrl({ ref, client: bk, commentId: comment.id });
   // Persist the publication in status.json so the UI shows it as posted.
   try {
     const statusPath = path.join(config.dirs.jobs, jobName, "status.json");
@@ -116,8 +120,9 @@ async function publishReview(config, jobName, { customText } = {}) {
 // Outcome message when an automatic trigger hits an already-reviewed head:
 // deliver the held comment when publishing is enabled, otherwise explain why
 // nothing is posted. Never throws (webhook ack must not depend on delivery).
-async function existingReviewOutcome(config, previous) {
+async function existingReviewOutcome(config, previous, { platform = "bitbucket" } = {}) {
   const short = previous.sha ? String(previous.sha).slice(0, 8) : "an earlier commit";
+  const publishOn = platform === "github" ? config.job.publishToGithub : !config.job.dryRun;
   let status = {};
   try {
     const p = path.join(config.dirs.jobs, previous.job, "status.json");
@@ -128,12 +133,18 @@ async function existingReviewOutcome(config, previous) {
   if (status.publish?.published) {
     return `already reviewed and published at ${short}; nothing to do (comment ${status.publish.commentId})`;
   }
-  if (config.job.dryRun) {
-    return `already reviewed at ${short}; auto-publishing is off (PUBLISH_TO_BITBUCKET=0), nothing posted to Bitbucket`;
+  if (!publishOn) {
+    return platform === "github"
+      ? `already reviewed at ${short}; auto-publishing is off (PUBLISH_TO_GITHUB=0), nothing posted to GitHub`
+      : `already reviewed at ${short}; auto-publishing is off (PUBLISH_TO_BITBUCKET=0), nothing posted to Bitbucket`;
   }
   try {
     const r = await publishReview(config, previous.job);
-    if (r.published) return `delivered the existing review of ${short} to Bitbucket (comment ${r.commentId})`;
+    if (r.published) {
+      return platform === "github"
+        ? `delivered the existing review of ${short} to GitHub (comment ${r.commentId})`
+        : `delivered the existing review of ${short} to Bitbucket (comment ${r.commentId})`;
+    }
     if (r.stale) return `already reviewed at ${short} but the PR head moved since; existing review not published`;
     return `already reviewed at ${short}; existing review not published (${r.error || "unknown"})`;
   } catch (err) {
@@ -166,10 +177,13 @@ const TEACH_FORCE_REPLY = (short) =>
   `No changes since the last review (same commit \`${short}\`, no new comments), so there was nothing new to check and I skipped a redundant re-review.\n\nTo force a fresh review anyway, comment: \`/ai-review --force\``;
 
 async function replyTeachForce(config, ref, triggerCommentId, previous) {
-  if (config.job.dryRun) return;
+  // Only reply when publishing is enabled for the *ref's own platform* — the
+  // per-platform contract (PUBLISH_TO_BITBUCKET / PUBLISH_TO_GITHUB) must not
+  // be bypassed by a GitHub ref while its gate is off.
+  if (!shouldPublish(config, ref)) return;
   const short = previous?.sha ? String(previous.sha).slice(0, 8) : "…";
   try {
-    const client = new BitbucketClient(config.bitbucket);
+    const client = createReviewClient(config, ref);
     const comment = await client.postPullRequestComment({
       projectKey: ref.projectKey,
       repoSlug: ref.repoSlug,
@@ -183,8 +197,8 @@ async function replyTeachForce(config, ref, triggerCommentId, previous) {
   }
 }
 
-export function createServer({ config, port = config.server.port, host = config.server.host }) {
-  assertBitbucketConfig(config);
+export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview } = {}) {
+  assertAnyBackendConfig(config);
   const clients = new Set();
   // One review runs at a time; extra requests (webhook or UI) wait in the queue.
   const state = { runningJob: null, activeRef: null, queue: [] };
@@ -240,14 +254,16 @@ export function createServer({ config, port = config.server.port, host = config.
   };
 
   const sameRef = (a, b) =>
-    !!a && !!b && a.projectKey === b.projectKey && a.repoSlug === b.repoSlug && a.prId === b.prId;
+    !!a && !!b &&
+    (a.platform || "bitbucket") === (b.platform || "bitbucket") &&
+    a.projectKey === b.projectKey && a.repoSlug === b.repoSlug && a.prId === b.prId;
 
   const startNext = () => {
     if (state.runningJob || state.queue.length === 0) return false;
     const next = state.queue.shift();
     state.runningJob = "starting";
     state.activeRef = next.ref;
-    runReview({
+    reviewRunner({
       ref: next.ref,
       config,
       options: {
@@ -393,7 +409,7 @@ export function createServer({ config, port = config.server.port, host = config.
         // fresh review.
         const forced = parsed.text ? isForceReview(parsed.text) : false;
         if (parsed.head && !forced) {
-          const prefix = sanitize(`${parsed.ref.projectKey}-${parsed.ref.repoSlug}-PR${parsed.ref.prId}-`);
+          const prefix = jobPrefixFor(parsed.ref);
           const previous = findPreviousReview({ jobsDir: config.dirs.jobs, jobPrefix: prefix, currentJob: null });
           if (alreadyReviewedAt(previous, parsed.head)) {
             let newDiscussion = false;
@@ -430,6 +446,90 @@ export function createServer({ config, port = config.server.port, host = config.
         // Publish only when explicitly enabled (PUBLISH_TO_BITBUCKET=1); the
         // default is a dry-run that stops at a draft comment.
         const publish = !config.job.dryRun;
+        const { queued, duplicate, position } = enqueue({ ref: parsed.ref, publish });
+        const via = parsed.reviewer ? `${parsed.via} ${parsed.reviewer}` : "/ai-review";
+        log.info(
+          `webhook ${via} ${parsed.ref.projectKey}/${parsed.ref.repoSlug}#${parsed.ref.prId} by ${parsed.actor} queued=${queued} duplicate=${duplicate} publish=${publish}`,
+        );
+        return sendJson(res, 200, { ok: true, accepted: true, queued, duplicate, position, ref: parsed.ref });
+      }
+
+      // --- GitHub webhook --------------------------------------------------
+      if (url === "/webhooks/github" && method === "POST") {
+        if (!config.github?.webhookSecret) {
+          log.warn("webhook rejected: github backend not configured (GITHUB_WEBHOOK_SECRET)");
+          return sendJson(res, 403, { error: "GitHub webhook not configured" });
+        }
+        const raw = await readRawBody(req);
+        // GitHub's webhook test button delivers an unsigned `ping` event. It
+        // triggers nothing, so it is accepted without an HMAC check (the
+        // empty-secret guard above has already ruled out a disabled endpoint);
+        // real deliveries still require a valid X-Hub-Signature-256.
+        if (String(req.headers["x-github-event"] || "").toLowerCase() === "ping") {
+          log.info("webhook: github ping accepted (unsigned test event)");
+          return sendJson(res, 200, { ok: true, ignored: "ping" });
+        }
+        const sigCheck = verifySignature(raw, req.headers["x-hub-signature-256"], config.github.webhookSecret);
+        if (!sigCheck.ok) {
+          log.warn(`webhook rejected: ${sigCheck.reason}`);
+          return sendJson(res, 401, { error: sigCheck.reason });
+        }
+        let payload = null;
+        try {
+          payload = JSON.parse(raw || "{}");
+        } catch {
+          return sendJson(res, 400, { error: "invalid JSON body" });
+        }
+        const parsed = parseGitHubWebhookRequest({
+          headers: req.headers,
+          payload,
+          allowedUsers: config.job.allowedReviewerUsers,
+          autoReviewOffRepos: config.job.githubAutoReviewOffRepos,
+          reviewerSkipBranchPairs: config.job.reviewOnReviewerAddedSkip,
+        });
+        if (!parsed.ok) {
+          if (parsed.status === 200) {
+            log.info(`webhook: ${parsed.ignored}`);
+            return sendJson(res, 200, { ok: true, ignored: parsed.ignored });
+          }
+          log.warn(`webhook ignored: ${parsed.error}`);
+          return sendJson(res, parsed.status, { error: parsed.error });
+        }
+        // Same-head dedup (GitHub only includes the head SHA on pull_request
+        // events — an /ai-review comment always re-reviews). "/ai-review
+        // --force" (or "-force") always runs a fresh review.
+        const forced = parsed.text ? isForceReview(parsed.text) : false;
+        if (parsed.head && !forced) {
+          const prefix = jobPrefixFor(parsed.ref);
+          const previous = findPreviousReview({ jobsDir: config.dirs.jobs, jobPrefix: prefix, currentJob: null });
+          if (alreadyReviewedAt(previous, parsed.head)) {
+            let newDiscussion = false;
+            if (config.review.fetchPrDiscussion) {
+              const since = previousReviewTimeMs(config, previous);
+              const excludeIds = new Set();
+              const prevCommentId = previousReviewCommentId(previous, { jobsDir: config.dirs.jobs });
+              if (prevCommentId != null) excludeIds.add(Number(prevCommentId));
+              if (parsed.commentId != null) excludeIds.add(Number(parsed.commentId));
+              newDiscussion = await hasNewHumanDiscussion({
+                client: createReviewClient(config, parsed.ref),
+                ref: parsed.ref,
+                botUsernames: botUsernamesOf(config, parsed.ref),
+                since,
+                excludeIds,
+              });
+            }
+            if (!newDiscussion) {
+              const outcome = await existingReviewOutcome(config, previous, { platform: "github" });
+              const who = parsed.reviewer ? `auto ${parsed.via} ${parsed.reviewer}` : `/ai-review by ${parsed.actor || "?"}`;
+              log.info(`webhook ${who} ${parsed.ref.projectKey}/${parsed.ref.repoSlug}#${parsed.ref.prId}: ${outcome}`);
+              return sendJson(res, 200, { ok: true, ignored: outcome });
+            }
+            log.info(
+              `webhook /ai-review ${parsed.ref.projectKey}/${parsed.ref.repoSlug}#${parsed.ref.prId}: same head but new discussion since the last review — re-reviewing`,
+            );
+          }
+        }
+        const publish = shouldPublish(config, parsed.ref);
         const { queued, duplicate, position } = enqueue({ ref: parsed.ref, publish });
         const via = parsed.reviewer ? `${parsed.via} ${parsed.reviewer}` : "/ai-review";
         log.info(
@@ -488,13 +588,13 @@ export function createServer({ config, port = config.server.port, host = config.
       }
 
       // --- per-PR view ------------------------------------------------------
-      // `live=0` skips the Bitbucket head/commit lookups (local jobs only).
+      // `live=0` skips the platform head/commit lookups (local jobs only).
       if (url === "/api/pulls") {
         const q = new URL(req.url, "http://localhost").searchParams;
         const live = q.get("live") !== "0";
         const out = await listPulls(config, {
           live,
-          client: live ? new BitbucketClient(config.bitbucket) : null,
+          clients: live ? liveClients(config) : {},
         });
         return sendJson(res, 200, out);
       }
@@ -538,10 +638,33 @@ export function createServer({ config, port = config.server.port, host = config.
           return sendJson(res, 400, { error: err.message });
         }
         // Merged / declined / superseded PRs can no longer be reviewed — and
-        // neither can PRs Bitbucket no longer has (404: purged after merge or
-        // decline). Fail open on other errors (network etc.) so a lookup outage
-        // never blocks the dashboard; the run itself would surface the error.
-        if (config.bitbucket?.baseUrl && config.bitbucket?.token) {
+        // neither can PRs the platform no longer has (404: purged after merge
+        // or decline). Fail open on other errors (network etc.) so a lookup
+        // outage never blocks the dashboard; the run itself would surface the
+        // error. The platform branch is exclusive: a GitHub ref is only ever
+        // looked up on GitHub (a missing GITHUB_TOKEN skips the gate instead of
+        // leaking the GitHub ref into the Bitbucket lookup).
+        if (ref.platform === "github") {
+          if (config.github?.token) {
+            try {
+              const client = createReviewClient(config, ref);
+              const pr = await client.getPullRequest(ref);
+              const st = String(pr?.state || "").toUpperCase();
+              if (["MERGED", "CLOSED"].includes(st)) {
+                return sendJson(res, 409, {
+                  error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} is ${st.toLowerCase()} and can no longer be reviewed`,
+                });
+              }
+            } catch (err) {
+              if (err?.status === 404 || /does not exist|not found/i.test(err?.message || "")) {
+                return sendJson(res, 409, {
+                  error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} no longer exists in GitHub and can no longer be reviewed`,
+                });
+              }
+              /* other lookup failures are allowed through */
+            }
+          }
+        } else if (config.bitbucket?.baseUrl && config.bitbucket?.token) {
           try {
             const client = new BitbucketClient(config.bitbucket);
             const pr = await client.getPullRequest(ref);

@@ -24,6 +24,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { log } from "./log.js";
+import { backendConfig } from "./clients.js";
 
 function git(args) {
   return spawnSync("git", args, {
@@ -41,22 +42,78 @@ function throwIf(res, what) {
   return res;
 }
 
+/** The git clone host for a GitHub API base (github.com vs GHES). */
+function githubGitHost(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    if (u.host === "api.github.com") return "github.com";
+    // GHES: the API lives at <host>/api/v3; the git clone host is the same
+    // origin (no path).
+    return u.host;
+  } catch {
+    return "github.com";
+  }
+}
+
 /** https://<host>/scm/<projectKey>/<repoSlug>.git — Bitbucket DC layout. */
-export function scmUrl({ baseUrl, projectKey, repoSlug }) {
+export function scmUrl({ baseUrl, projectKey, repoSlug, platform }) {
+  if (platform === "github") {
+    const host = githubGitHost(baseUrl);
+    return `https://${host}/${encodeURIComponent(projectKey)}/${encodeURIComponent(repoSlug)}.git`;
+  }
   const host = new URL(baseUrl).host;
   return `https://${host}/scm/${String(projectKey).toLowerCase()}/${String(repoSlug).toLowerCase()}.git`;
 }
 
-function bareRepoDir({ workspaceRoot, projectKey, repoSlug }) {
-  return path.join(workspaceRoot, `${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}.git`);
+/**
+ * An https URL with inline Basic-auth credentials (used only as a throwaway
+ * fetch argument — never persisted in the repo config). The username is used
+ * as given, byte-for-byte — the GitHub-only `x-token-auth` fallback lives in
+ * `checkoutUsername`, never here, so the Bitbucket path is unchanged when
+ * BITBUCKET_USERNAME is empty (an empty username maps to an empty username,
+ * matching the pre-adapter behaviour).
+ */
+export function basicAuthUrl(raw, username, token) {
+  const u = new URL(raw);
+  u.username = username;
+  u.password = token;
+  return u.toString();
 }
 
-function worktreePath({ workspaceRoot, projectKey, repoSlug, sha }) {
-  return path.join(workspaceRoot, `${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}-${String(sha).slice(0, 8)}`);
+/**
+ * The git-auth username for a checkout URL. GitHub clones with no bot username
+ * use `x-token-auth` (the conventional token-user) as the URL username; every
+ * other platform keeps the configured username as-is, so the fallback can never
+ * leak into the Bitbucket path.
+ */
+export function checkoutUsername(platform, username) {
+  return platform === "github" ? username || "x-token-auth" : username;
 }
 
-function lockDir({ workspaceRoot, projectKey, repoSlug }) {
-  return path.join(workspaceRoot, `.lock-${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}`);
+function bareRepoDir({ workspaceRoot, ref }) {
+  return path.join(workspaceRoot, `${repoNameOf(ref)}.git`);
+}
+
+function worktreePath({ workspaceRoot, ref, sha }) {
+  return path.join(workspaceRoot, `${repoNameOf(ref)}-${String(sha).slice(0, 8)}`);
+}
+
+function lockDir({ workspaceRoot, ref }) {
+  return path.join(workspaceRoot, `.lock-${repoNameOf(ref)}`);
+}
+
+/**
+ * Lowercased `owner-repo` handle for the cache dirs, namespaced & *separated*
+ * for GitHub (`github@owner-repo`) so a mirrored GitHub acme/widgets can never
+ * share a bare repo / worktree / lock with a Bitbucket repository whose key
+ * happens to be `GITHUB` (which would lowercase to the `github-` prefix).
+ * `@` cannot appear in a Bitbucket key or repo slug, so the Github handle can
+ * never be produced by a Bitbucket one. Bitbucket names are byte-for-byte
+ * unchanged (existing caches stay valid).
+ */
+export function repoNameOf(ref) {
+  const slug = `${String(ref?.projectKey).toLowerCase()}-${String(ref?.repoSlug).toLowerCase()}`;
+  return ref?.platform === "github" ? `github@${slug}` : slug;
 }
 
 async function withLock(lock, fn, timeoutMs = 30000) {
@@ -81,13 +138,13 @@ async function withLock(lock, fn, timeoutMs = 30000) {
 }
 
 /** Ensure the bare cache repo exists, configured for this cluster, and fetch the reviewed SHA. */
-async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin }) {
-  const bare = bareRepoDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin, platform }) {
+  const bare = bareRepoDir({ workspaceRoot, ref });
   mkdirSync(path.dirname(bare), { recursive: true });
 
   if (!existsSync(path.join(bare, "HEAD"))) {
     throwIf(git(["init", "--bare", bare]), "git init");
-    const url = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+    const url = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
     throwIf(git(["--git-dir", bare, "remote", "add", "origin", url]), "git remote add");
     if (!verifyTls) git(["--git-dir", bare, "config", "http.sslVerify", "false"]);
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
@@ -106,15 +163,13 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
 
   // Some Bitbucket DC versions accept REST Bearer but not git Bearer; fall back
   // to basic auth with the token as password (credentials in the URL, used
-  // inline so they are never persisted in the repo config). Local file remotes
-  // (tests) skip this — they need no auth.
-  const baseUrl2 = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  // inline so they are never persisted in the repo config). GitHub accepts a
+  // PAT as the password the same way. Local file remotes (tests) skip this —
+  // they need no auth.
+  const baseUrl2 = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
   if (token && /^https?:/i.test(baseUrl2)) {
-    const u = new URL(baseUrl2);
-    u.username = username;
-    u.password = token;
-    attempts.push([...base, "--depth=1", u.toString(), sha]);
-    if (branch) attempts.push([...base, "--depth=50", u.toString(), branch]);
+    attempts.push([...base, "--depth=1", basicAuthUrl(baseUrl2, username, token), sha]);
+    if (branch) attempts.push([...base, "--depth=50", basicAuthUrl(baseUrl2, username, token), branch]);
   }
 
   // A raw-SHA fetch is refused by some DC versions (and by local file remotes);
@@ -137,7 +192,7 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
 
 /** Attach (or reuse) a detached worktree at the deterministic SHA dir. */
 function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
-  const wt = worktreePath({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug, sha });
+  const wt = worktreePath({ workspaceRoot, ref, sha });
 
   if (existsSync(path.join(wt, ".git"))) return wt; // already a linked worktree
 
@@ -148,7 +203,7 @@ function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
 
 /** Keep only the newest `keep` worktrees per repo; let git prune the rest. */
 async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
-  const bare = bareRepoDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  const bare = bareRepoDir({ workspaceRoot, ref });
   if (!existsSync(path.join(bare, "HEAD"))) return;
 
   const list = git(["--git-dir", bare, "worktree", "list", "--porcelain"]);
@@ -196,23 +251,34 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
   if (!config.checkout?.enabled) return { ok: false, reason: "disabled" };
   if (!sha) return { ok: false, reason: "no reviewed sha" };
   const workspaceRoot = config.dirs.workspaceRoot;
-  const lock = lockDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  const lock = lockDir({ workspaceRoot, ref });
 
   try {
     // The workspace dir may not exist yet in the pod (only jobs/ is pre-created
     // in the image); the lock + bare repos live under it, so create it first.
     mkdirSync(workspaceRoot, { recursive: true });
+    // Platform-selected backend (github vs bitbucket). loadConfig always builds
+    // a config.github object, so for GitHub refs we must key on the *token*
+    // (absent without GITHUB_TOKEN) rather than on the object — otherwise this
+    // clear refusal could never fire in production.
+    const backend = backendConfig(config, ref);
+    if (ref?.platform === "github" && !backend?.token) {
+      return { ok: false, reason: "github backend not configured (GITHUB_TOKEN)" };
+    }
     return await withLock(lock, async () => {
       const bare = await ensureFetched({
-        baseUrl: config.bitbucket.baseUrl,
-        token: config.bitbucket.token,
-        username: config.bitbucket.username,
-        verifyTls: config.bitbucket.verifyTls,
+        baseUrl: backend.baseUrl,
+        token: backend.token,
+        // GitHub clones with no bot username default to x-token-auth; Bitbucket
+        // keeps its username byte-for-byte (empty stays empty).
+        username: checkoutUsername(ref?.platform, backend.username),
+        verifyTls: backend.verifyTls,
         workspaceRoot,
         ref,
         sha,
         branch,
         origin,
+        platform: ref?.platform,
       });
       const wt = ensureWorktree({ workspaceRoot, ref, sha, bare });
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });

@@ -1,6 +1,6 @@
 {
   "name": "ai-pr-reviewer",
-  "version": "0.3.9",
+  "version": "0.4.2",
   "private": true,
   "description": "On-demand AI pull-request reviewer for Bitbucket Data Center",
   "type": "module",
@@ -12,6 +12,6 @@
     "ui": "node --env-file-if-exists=.env src/server.js",
     "help": "node --env-file-if-exists=.env src/cli.js help",
     "build:agents": "node scripts/build-agents.mjs",
-    "test": "node scripts/build-agents.mjs --check && node --test tests/extractJson.test.js tests/webhook.test.js tests/config.test.js tests/context.test.js tests/discussion.test.js tests/prImages.test.js tests/checkout.test.js tests/jira.test.js tests/report.test.js tests/costs.test.js tests/opencode.test.js tests/pulls.test.js tests/stats.test.js tests/grounding.test.js tests/agents.test.js tests/diff.test.js tests/previous.test.js"
+    "test": "node scripts/build-agents.mjs --check && node --test tests/extractJson.test.js tests/webhook.test.js tests/webhook-github.test.js tests/server-github-webhook.test.js tests/config.test.js tests/prUrl.test.js tests/clients.test.js tests/context.test.js tests/discussion.test.js tests/prImages.test.js tests/checkout.test.js tests/checkout-github.test.js tests/github.test.js tests/jira.test.js tests/report.test.js tests/costs.test.js tests/opencode.test.js tests/pulls.test.js tests/pipeline.test.js tests/stats.test.js tests/grounding.test.js tests/agents.test.js tests/diff.test.js tests/previous.test.js"
   }
 }

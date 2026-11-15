@@ -9,7 +9,7 @@
 import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { BitbucketClient } from "./bitbucket.js";
+import { createReviewClient, botUsernamesOf, prCommentUrl, reportBaseUrl } from "./clients.js";
 import { buildReviewerContext, buildConsensusContext, loadProjectContext } from "./context.js";
 import { prepareCheckout, cleanupCheckout } from "./checkout.js";
 import { runAgent } from "./opencode.js";
@@ -38,7 +38,22 @@ const CORE_REVIEWER_DEFS = REVIEWER_DEFS.filter((d) => d.key !== "d");
 const MIN_REVIEWERS = 2;
 
 export function sanitize(s) {
-  return String(s).replace(/[^A-Za-z0-9._-]+/g, "-");
+  // `@` is preserved so a platform-namespace marker (github@…) survives; it
+  // cannot appear in a Bitbucket project key or repo slug, so the marker can
+  // never be produced by a Bitbucket name.
+  return String(s).replace(/[^A-Za-z0-9._@-]+/g, "-");
+}
+
+/**
+ * Deterministic job-name prefix for a ref (`<proj>-<repo>-PR<N>-`). GitHub is
+ * namespaced with `github@…` (mirroring the checkout cache separator) so a
+ * GitHub owner/repo never shares a job namespace with a Bitbucket project/repo
+ * whose key is literally `GITHUB` (or lowercases to `github`); Bitbucket
+ * prefixes are byte-for-byte unchanged (existing job dirs stay readable).
+ */
+export function jobPrefixFor(ref) {
+  const base = `${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-`;
+  return sanitize(ref?.platform === "github" ? `github@${base}` : base);
 }
 
 // Attach token usage + computed cost to a finished attempt (from runAgent).
@@ -87,7 +102,7 @@ function rollupAgentCost(agentState, attempts) {
 function noop() {}
 
 export async function runReview({ ref, config, options = {} }) {
-  const client = new BitbucketClient(config.bitbucket);
+  const client = createReviewClient(config, ref);
   const emit = options.emit || noop;
   const onStage = options.onStage || noop;
   const jobsDir = config.dirs.jobs;
@@ -159,7 +174,7 @@ export async function runReview({ ref, config, options = {} }) {
 
   const from = pullRequest.fromRef || {};
   const reviewedSha = from.latestCommit || from.id;
-  const jobName = sanitize(`${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-${reviewedSha?.slice(0, 8)}`);
+  const jobName = `${jobPrefixFor(ref)}${reviewedSha?.slice(0, 8)}`;
   const jobDir = path.join(jobsDir, jobName);
   mkdirSync(jobDir, { recursive: true });
 
@@ -255,7 +270,7 @@ export async function runReview({ ref, config, options = {} }) {
   // instead of re-raising already-addressed findings. Additive + non-fatal.
   // The previous review is looked up early and reused later for the consensus
   // resolved_previous reconciliation.
-  const jobPrefix = sanitize(`${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-`);
+  const jobPrefix = jobPrefixFor(ref);
   const previous = findPreviousReview({ jobsDir, jobPrefix, currentJob: jobName });
   const reviewCommentId = previousReviewCommentId(previous, { jobsDir });
   // The PR activity feed is shared by the discussion step (text clarifications)
@@ -275,7 +290,7 @@ export async function runReview({ ref, config, options = {} }) {
     discussionBlock = await loadDiscussion({
       client,
       ref,
-      botUsernames: [config.bitbucket.username].filter(Boolean),
+      botUsernames: botUsernamesOf(config, ref),
       reviewCommentId,
       activities: activities ?? undefined,
     });
@@ -356,21 +371,18 @@ export async function runReview({ ref, config, options = {} }) {
   try {
     onStage("review");
     fire("stage", { stage: "review" });
-    const reviewerOutcomes = await Promise.all(
-      activeDefs.map((def) =>
-        runReviewerWithRetries(config, {
-          ...def,
-          model: effectiveModels[def.field],
-          contextFile,
-          cwd: agentCwd,
-          jobDir,
-          fire,
-          status,
-          flushStatus,
-          prices,
-        }),
-      ),
-    );
+    const reviewerOutcomes = await runReviewers({
+      activeDefs,
+      config,
+      effectiveModels,
+      contextFile,
+      agentCwd,
+      jobDir,
+      fire,
+      status,
+      flushStatus,
+      prices,
+    });
 
     const failed = reviewerOutcomes.filter((r) => !r.ok);
     for (const f of failed) {
@@ -454,7 +466,7 @@ export async function runReview({ ref, config, options = {} }) {
       report: consensus.report,
       ref,
       pullRequest,
-      baseUrl: config.bitbucket.baseUrl,
+      baseUrl: reportBaseUrl({ config, ref, pullRequest }),
       jiraTickets: jira.tickets, // Linked-ticket context (ACs) for the report/comment appendix
       degraded,
       policy: {
@@ -512,6 +524,35 @@ export async function runReview({ ref, config, options = {} }) {
   } finally {
     await cleanupCheckout({ config, ref });
   }
+}
+
+// Run the active reviewers with bounded parallelism. REVIEWER_PARALLELISM
+// (config.review.parallelism): 0/unset = all at once (the historical default);
+// 1 = one at a time (for small hosts); N = at most N at a time. Only the
+// scheduling changes — every reviewer-def option stays identical.
+async function runReviewers({ activeDefs, config, effectiveModels, contextFile, agentCwd, jobDir, fire, status, flushStatus, prices }) {
+  const task = (def) =>
+    runReviewerWithRetries(config, {
+      ...def,
+      model: effectiveModels[def.field],
+      contextFile,
+      cwd: agentCwd,
+      jobDir,
+      fire,
+      status,
+      flushStatus,
+      prices,
+    });
+  const limit = Number(config?.review?.parallelism) || 0;
+  if (limit > 0) {
+    const outcomes = [];
+    for (let i = 0; i < activeDefs.length; i += limit) {
+      const batch = activeDefs.slice(i, i + limit);
+      outcomes.push(...(await Promise.all(batch.map(task))));
+    }
+    return outcomes;
+  }
+  return Promise.all(activeDefs.map(task));
 }
 
 async function runReviewerWithRetries(config, { key, agent, label, model, contextFile, cwd, jobDir, fire, status, flushStatus, prices }) {
@@ -711,9 +752,7 @@ async function publishComment({ client, ref, pullRequest, report, reportMarkdown
     published: true,
     stale: false,
     commentId,
-    url: `${client.baseUrl}/projects/${encodeURIComponent(ref.projectKey)}/repos/${encodeURIComponent(
-      ref.repoSlug,
-    )}/pull-requests/${ref.prId}?comment=${commentId}`,
+    url: prCommentUrl({ ref, pullRequest, client, commentId }),
   };
 }
 

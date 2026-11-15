@@ -154,9 +154,29 @@ export function loadConfig({ envFile } = {}) {
       webhookSecret: str("BITBUCKET_WEBHOOK_SECRET"),
       verifyTls: bool("VERIFY_TLS", true),
     },
+    github: {
+      // GitHub REST API base. Defaults to github.com's API; for GitHub
+      // Enterprise Server set e.g. https://git.example.com/api/v3 (no slash).
+      // An explicitly empty GITHUB_API_BASE_URL= is treated as unset (the
+      // github.com default applies) — empty would break every API call.
+      baseUrl: (str("GITHUB_API_BASE_URL") || "https://api.github.com").replace(/\/+$/, ""),
+      // Auth starts with a classic PAT; GitHub App installation tokens work
+      // unchanged (the client only sends `Authorization: Bearer <token>`).
+      token: str("GITHUB_TOKEN"),
+      // Bot login for this reviewer (used to filter our own comments out of the
+      // PR discussion context). Empty = unknown bot identity.
+      username: str("GITHUB_USERNAME"),
+      // Webhook signature secret (HMAC-SHA256, `X-Hub-Signature-256`). Empty =
+      // signatures are not checked.
+      webhookSecret: str("GITHUB_WEBHOOK_SECRET"),
+      verifyTls: bool("VERIFY_TLS", true),
+    },
     job: {
       // Safe default: never post to Bitbucket unless explicitly enabled.
       dryRun: !bool("PUBLISH_TO_BITBUCKET", false),
+      // Independent GitHub publish gate: PUBLISH_TO_GITHUB=1 posts to GitHub
+      // even on a Bitbucket-only pipeline (and vice versa).
+      publishToGithub: bool("PUBLISH_TO_GITHUB", false),
       // Authorization allowlist: who may trigger (and who, being added as a PR
       // reviewer, starts an auto-review). Empty = anyone.
       allowedReviewerUsers: list("ALLOWED_REVIEWER_USERS"),
@@ -164,6 +184,11 @@ export function loadConfig({ envFile } = {}) {
       // (reviewer added / PR opened with a reviewer / draft marked ready) is
       // disabled. Not listed = ON by default.
       autoReviewOffRepos: parseAutoReviewOffRepos(str("AUTO_REVIEW_OFF_REPOS")),
+      // Auto-review opt-out for GitHub PRs (GITHUB_AUTO_REVIEW_OFF_REPOS).
+      // Kept separate from AUTO_REVIEW_OFF_REPOS: GitHub `owner/repo` and
+      // Bitbucket `PROJECT/repo` share the same string shape, so a shared list
+      // could not tell the two platforms apart.
+      githubAutoReviewOffRepos: parseAutoReviewOffRepos(str("GITHUB_AUTO_REVIEW_OFF_REPOS")),
       // Branch pairs whose pull requests never start a reviewer-added review (merge PRs).
       reviewOnReviewerAddedSkip: parseReviewerSkipBranchPairs(str("REVIEW_ON_REVIEWER_ADDED_SKIP")),
     },
@@ -254,6 +279,10 @@ export function loadConfig({ envFile } = {}) {
       // PR as a translation/content PR so reviewer D joins the review. Empty
       // TRANSLATION_PATH_PATTERNS = the default i18n/gettext patterns.
       translationPathPatterns: parsePathPatterns(str("TRANSLATION_PATH_PATTERNS")),
+      // Reviewer concurrency knob: 0/unset = run all active reviewers in
+      // parallel (the default). 1 = run them one at a time (for small hosts
+      // like the Oracle Always-Free VM); N = at most N at a time.
+      parallelism: int("REVIEWER_PARALLELISM", 0),
     },
     checkout: {
       // Shallow-checkout the reviewed commit into WORKSPACE_ROOT so reviewers
@@ -291,5 +320,31 @@ export function assertBitbucketConfig(config) {
   if (!config.bitbucket.token) problems.push("BITBUCKET_API_TOKEN is not set");
   if (problems.length) {
     throw new Error(`Invalid configuration:\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
+/** Throws a readable error when the GitHub backend is missing a required setting. */
+export function assertGithubConfig(config) {
+  const problems = [];
+  if (!config.github.token) problems.push("GITHUB_TOKEN is not set");
+  if (problems.length) {
+    throw new Error(`Invalid configuration:\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
+/**
+ * Boot requires at least one configured backend (Bitbucket and/or GitHub),
+ * never a specific one — each backend is independently optional (parallel
+ * backends, not a platform switch).
+ */
+export function assertAnyBackendConfig(config) {
+  const bitbucketConfigured = !!(config.bitbucket?.baseUrl && config.bitbucket?.token);
+  const githubConfigured = !!(config.github?.token);
+  if (!bitbucketConfigured && !githubConfigured) {
+    throw new Error(
+      "Invalid configuration: neither Bitbucket nor GitHub is configured.\n" +
+        "  - Bitbucket: BITBUCKET_BASE_URL and BITBUCKET_API_TOKEN\n" +
+        "  - GitHub:    GITHUB_TOKEN (GITHUB_API_BASE_URL for GitHub Enterprise Server)",
+    );
   }
 }
