@@ -7,7 +7,7 @@ below in chronological order.
 
 ---
 
-## Unreleased — GitHub backend (parallel platform support)
+## v0.5.0 — 2026-11-15 — GitHub backend (parallel platform support)
 
 - **GitHub is now a first-class, *parallel* backend** alongside Bitbucket Data
   Center — not a mode switch. A review picks its platform from the PR reference:
@@ -33,6 +33,26 @@ below in chronological order.
   `MERGED`/`CLOSED` GitHub PRs are dimmed like merged/declined Bitbucket PRs).
 - **Operational knobs:** `REVIEWER_PARALLELISM` (0 = parallel default, 1 =
   strictly serial for small hosts) and a GitHub-only `.env` profile for the VM.
+
+### Live proof — GitHub backend end-to-end on real infra (2026-11-15)
+
+- **GitHub backend exercised live:** a real repo webhook (`pull_request` +
+  `issue_comment`) verified HMAC, allowlist, `/ai-review` trigger, checkout,
+  serial reviewers → consensus → draft report in `jobs/` and the dashboard.
+  Publishing stayed off (`PUBLISH_TO_GITHUB=0`).
+- **Runtime guidance from the proof:** run opencode as a shared background
+  service (`OPENCODE_STANDALONE=0`, `opencode serve --service` under a supervisor
+  like systemd). Per-run standalone (`=1`) repeatedly hit `provider.no-route` /
+  hangs on a small host; the Docker path in `docker/entrypoint.mjs` already
+  implements the service mode.
+- **`docker/opencode.json.template` is a skeleton, not a ready config:**
+  materializing it needs the `llm-gateway.example.com` host replaced **and** the
+  `providers/example/msp` path tenant replaced with the real farm value — missing
+  the tenant swap makes every `aifarm-msp/*` model answer HTTP 404
+  ("Resource not found").
+- **Serial reviewers validated on a 1-vCPU host** (`REVIEWER_PARALLELISM=1`):
+  DeepSeek Flash, Qwen and GPT-6 Luna each completed in tens of seconds per stage
+  with Claude Haiku consensus.
 
 ## v0.4.2 — 2026-11-13 — Public-comment wording + working Jira acceptance-criteria verdicts
 
