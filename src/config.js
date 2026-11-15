@@ -157,7 +157,9 @@ export function loadConfig({ envFile } = {}) {
     github: {
       // GitHub REST API base. Defaults to github.com's API; for GitHub
       // Enterprise Server set e.g. https://git.example.com/api/v3 (no slash).
-      baseUrl: str("GITHUB_API_BASE_URL", "https://api.github.com").replace(/\/+$/, ""),
+      // An explicitly empty GITHUB_API_BASE_URL= is treated as unset (the
+      // github.com default applies) — empty would break every API call.
+      baseUrl: (str("GITHUB_API_BASE_URL") || "https://api.github.com").replace(/\/+$/, ""),
       // Auth starts with a classic PAT; GitHub App installation tokens work
       // unchanged (the client only sends `Authorization: Bearer <token>`).
       token: str("GITHUB_TOKEN"),

@@ -124,6 +124,6 @@ test("prepareCheckout is hermetic: the bare repo and lock are keyed by owner/rep
   const config = baseConfig();
   const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
   assert.equal(res.ok, true, res.reason);
-  const bare = path.join(config.dirs.workspaceRoot, "github-acme-widgets.git");
+  const bare = path.join(config.dirs.workspaceRoot, "github@acme-widgets.git");
   assert.ok(existsSync(path.join(bare, "HEAD")), `bare repo should exist at ${bare}`);
 });

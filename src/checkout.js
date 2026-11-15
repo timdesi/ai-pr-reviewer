@@ -92,14 +92,17 @@ function lockDir({ workspaceRoot, ref }) {
 }
 
 /**
- * Lowercased `owner-repo` handle for the cache dirs, platform-namespaced for
- * GitHub (`github-owner-repo`) so a mirrored GitHub acme/widgets never shares
- * a bare repo / worktree / lock with a Bitbucket ACME/widgets. Bitbucket names
- * are byte-for-byte unchanged (existing caches stay valid).
+ * Lowercased `owner-repo` handle for the cache dirs, namespaced & *separated*
+ * for GitHub (`github@owner-repo`) so a mirrored GitHub acme/widgets can never
+ * share a bare repo / worktree / lock with a Bitbucket repository whose key
+ * happens to be `GITHUB` (which would lowercase to the `github-` prefix).
+ * `@` cannot appear in a Bitbucket key or repo slug, so the Github handle can
+ * never be produced by a Bitbucket one. Bitbucket names are byte-for-byte
+ * unchanged (existing caches stay valid).
  */
 function repoNameOf(ref) {
   const slug = `${String(ref?.projectKey).toLowerCase()}-${String(ref?.repoSlug).toLowerCase()}`;
-  return ref?.platform === "github" ? `github-${slug}` : slug;
+  return ref?.platform === "github" ? `github@${slug}` : slug;
 }
 
 async function withLock(lock, fn, timeoutMs = 30000) {

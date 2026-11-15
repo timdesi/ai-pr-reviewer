@@ -1181,7 +1181,11 @@ function renderOverview(content, job) {
 }
 
 async function restartReview(job) {
-  const ref = `${job.ref.projectKey}/${job.ref.repoSlug}#${job.ref.prId}`;
+  const base = `${job.ref.projectKey}/${job.ref.repoSlug}#${job.ref.prId}`;
+  // A GitHub job must go back in platform-explicit form — the bare
+  // owner/repo#N short ref would default to Bitbucket and restart the review
+  // against the wrong backend.
+  const ref = job.ref?.platform === "github" ? `gh:${base}` : base;
   if (!window.confirm(`Re-run the review for ${ref}?\n\nModels will be invoked again (dry run — nothing is published).`)) return;
   try {
     const r = await fetch("/api/review", {
