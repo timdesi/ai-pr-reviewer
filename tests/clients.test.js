@@ -58,6 +58,15 @@ test("shouldPublish: Bitbucket is gated by dry-run (PUBLISH_TO_BITBUCKET)", () =
   assert.equal(shouldPublish({ ...config, job: { dryRun: true, publishToGithub: true } }, BB_REF), false);
 });
 
+test("shouldPublish: PUBLISH_TO_BITBUCKET=1 alone must NOT publish a GitHub ref (CLI regression)", () => {
+  // The CLI computed publish from the Bitbucket-only !dryRun flag, so with
+  // PUBLISH_TO_BITBUCKET=1 (dryRun false) and PUBLISH_TO_GITHUB=0 a CLI run on
+  // a GitHub ref posted the comment anyway. The platform gate must refuse.
+  assert.equal(shouldPublish({ ...config, job: { dryRun: false, publishToGithub: false } }, GH_REF), false);
+  // Turning the GitHub flag on is the only thing that publishes GitHub refs.
+  assert.equal(shouldPublish({ ...config, job: { dryRun: false, publishToGithub: true } }, GH_REF), true);
+});
+
 test("prCommentUrl: GitHub anchors the PR's own html_url", () => {
   const url = prCommentUrl({
     ref: GH_REF,

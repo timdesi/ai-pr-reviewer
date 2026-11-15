@@ -17,6 +17,7 @@ import { parsePrRef } from "./prUrl.js";
 import { runReview } from "./pipeline.js";
 import { initProxy } from "./proxy.js";
 import { log } from "./log.js";
+import { shouldPublish } from "./clients.js";
 import { heading, rule, ui, okBadge, failBadge, severityBadge, padRight, fmtDuration, fmtBytes } from "./ui.js";
 
 function parseArgs(argv) {
@@ -198,8 +199,12 @@ async function main() {
     return;
   }
 
-  // Publishing happens when --publish is given, or PUBLISH_TO_BITBUCKET=true in .env.
-  const publish = args.publish || !config.job.dryRun;
+  // Publishing happens when --publish is given (an explicit operator override),
+  // or when the platform's own publish gate is on (PUBLISH_TO_BITBUCKET for
+  // Bitbucket, PUBLISH_TO_GITHUB for GitHub). Using shouldPublish here — not the
+  // Bitbucket-only dryRun flag — keeps a CLI run on a GitHub ref dry by default
+  // on a mixed instance.
+  const publish = args.publish || shouldPublish(config, ref);
 
   const startedAt = Date.now();
   const stages = { fetch: "Fetching PR details", review: "Running reviewers in parallel", consensus: "Consensus", render: "Rendering report", publish: "Publishing" };
