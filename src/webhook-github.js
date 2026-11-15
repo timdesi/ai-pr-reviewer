@@ -2,7 +2,9 @@
 //
 // Signature: GitHub delivers `X-Hub-Signature-256: sha256=<hex>` (HMAC-SHA256
 // of the raw body with GITHUB_WEBHOOK_SECRET) — verified with the shared
-// `verifySignature` from src/webhook.js in the server.
+// `verifySignature` from src/webhook.js in the server. When
+// GITHUB_WEBHOOK_SECRET is empty the whole endpoint is disabled (fail closed):
+// the server returns 403 for every delivery, including ping.
 //
 // Events (see parseGitHubWebhookRequest below):
 //   - `ping`: GitHub's webhook test — accepted unsigned, triggers nothing.
@@ -80,6 +82,13 @@ export function parseGitHubWebhookRequest({
     const text = payload?.comment?.body;
     if (!isReviewTrigger(text)) {
       return { ok: false, status: 200, ignored: "comment is not an /ai-review trigger" };
+    }
+    // GitHub fires issue_comment for both issues and pull requests. A PR's
+    // issue object carries a `pull_request` sub-object; a plain issue does
+    // not. Only the former is a review target — an /ai-review on a plain issue
+    // must not become a phantom PR review (it would queue and 404 later).
+    if (!payload?.issue?.pull_request) {
+      return { ok: false, status: 200, ignored: "comment is on an issue, not a pull request" };
     }
     const actor = payload?.sender?.login ?? payload?.comment?.user?.login ?? null;
     if (!isAllowed(actor)) {

@@ -95,11 +95,21 @@ test("prepareCheckout refuses a GitHub ref when no github backend is configured"
   assert.match(res.reason, /github backend not configured/);
 });
 
+test("prepareCheckout refuses a GitHub ref when the github block has an empty token (loadConfig shape)", async () => {
+  const { remote, sha2 } = makeRemote();
+  // loadConfig always builds config.github (token "" without GITHUB_TOKEN), so
+  // the guard must key on the token, not on the object's presence.
+  const config = { checkout: { enabled: true, keep: 2 }, github: { baseUrl: "https://api.github.com", token: "", verifyTls: false }, dirs: { workspaceRoot: tempDir() } };
+  const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
+  assert.equal(res.ok, false);
+  assert.match(res.reason, /GITHUB_TOKEN/);
+});
+
 test("prepareCheckout is hermetic: the bare repo and lock are keyed by owner/repo", async () => {
   const { remote, sha2 } = makeRemote();
   const config = baseConfig();
   const res = await prepareCheckout({ config, ref: ghRef, sha: sha2, branch: "main", origin: remote });
   assert.equal(res.ok, true, res.reason);
-  const bare = path.join(config.dirs.workspaceRoot, "acme-widgets.git");
+  const bare = path.join(config.dirs.workspaceRoot, "github-acme-widgets.git");
   assert.ok(existsSync(path.join(bare, "HEAD")), `bare repo should exist at ${bare}`);
 });

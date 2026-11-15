@@ -33,12 +33,13 @@ function prPayload({ action = "opened", owner = "acme", repo = "widgets", number
 }
 
 /** A minimal issue_comment payload (manual /ai-review triggers). */
-function commentPayload({ action = "created", owner = "acme", repo = "widgets", number = 42, body = "/ai-review", sender = "timdesi", commentId = 9001 } = {}) {
+function commentPayload({ action = "created", owner = "acme", repo = "widgets", number = 42, body = "/ai-review", sender = "timdesi", commentId = 9001, onPr = true } = {}) {
   return {
     action,
     sender: { login: sender },
     repository: { full_name: `${owner}/${repo}`, name: repo, owner: { login: owner } },
-    issue: { number },
+    // For a PR, GitHub fills issue.pull_request; a plain issue omits it.
+    issue: onPr ? { number, pull_request: { url: "x", html_url: "y" } } : { number },
     comment: { id: commentId, body, user: { login: sender } },
   };
 }
@@ -105,6 +106,16 @@ test("ALLOWED_REVIEWER_USERS admits matching commenters (case-insensitively)", (
     allowedUsers: ["TimDesi"],
   });
   assert.equal(r.ok, true);
+});
+
+test("an /ai-review comment on a plain issue (not a PR) is ignored, not queued", () => {
+  const r = parseGitHubWebhookRequest({
+    headers: { "x-github-event": "issue_comment" },
+    payload: commentPayload({ onPr: false }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 200);
+  assert.match(r.ignored, /on an issue, not a pull request/);
 });
 
 test("pr:opened with an allowed requested reviewer starts a review", () => {

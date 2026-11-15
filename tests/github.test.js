@@ -130,6 +130,28 @@ test("getPullRequestCommits maps commits and follows Link-header pagination", as
   }
 });
 
+test("pagination refuses an off-host rel=next Link header (no token leak)", async () => {
+  const p1 = [
+    { sha: "sha-newest", commit: { message: "second", committer: { date: "2026-11-02T10:00:00Z" } }, author: { login: "bob" } },
+    { sha: "sha-mid", commit: { message: "first", committer: { date: "2026-11-01T10:00:00Z" } }, author: { login: "bob" } },
+  ];
+  // GitHub does not link off-host, but a MITM'd / misbehaving GHES could.
+  const evilLink = `<https://evil.example/repos/acme/widgets/pulls/42/commits?page=2>; rel="next"`;
+  const stub = stubFetch([{ url: /\/pulls\/42\/commits\?per_page=100$/, body: p1, headers: { link: evilLink } }]);
+  try {
+    const client = new GitHubClient({ token: "t" });
+    const commits = await client.getPullRequestCommits({ projectKey: "acme", repoSlug: "widgets", prId: 42 });
+    // Pagination stops after page 1; the evil host is never contacted and the
+    // bearer token never leaves the API host.
+    assert.equal(commits.length, 2);
+    assert.equal(stub.calls.length, 1, "only the first page should be fetched");
+    assert.ok(stub.calls[0].url.startsWith(API));
+    assert.match(stub.calls[0].init.headers.Authorization, /^Bearer /);
+  } finally {
+    stub.restore();
+  }
+});
+
 test("getUnifiedDiff asks for the .diff media type and returns raw text", async () => {
   const stub = stubFetch([{ url: /\/pulls\/42$/, body: "diff --git a/x b/x\nindex 000..111\n--- a/x\n+++ b/x\n+hello\n" }]);
   try {

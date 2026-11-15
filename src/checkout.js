@@ -65,16 +65,27 @@ export function scmUrl({ baseUrl, projectKey, repoSlug, platform }) {
   return `https://${host}/scm/${String(projectKey).toLowerCase()}/${String(repoSlug).toLowerCase()}.git`;
 }
 
-function bareRepoDir({ workspaceRoot, projectKey, repoSlug }) {
-  return path.join(workspaceRoot, `${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}.git`);
+function bareRepoDir({ workspaceRoot, ref }) {
+  return path.join(workspaceRoot, `${repoNameOf(ref)}.git`);
 }
 
-function worktreePath({ workspaceRoot, projectKey, repoSlug, sha }) {
-  return path.join(workspaceRoot, `${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}-${String(sha).slice(0, 8)}`);
+function worktreePath({ workspaceRoot, ref, sha }) {
+  return path.join(workspaceRoot, `${repoNameOf(ref)}-${String(sha).slice(0, 8)}`);
 }
 
-function lockDir({ workspaceRoot, projectKey, repoSlug }) {
-  return path.join(workspaceRoot, `.lock-${String(projectKey).toLowerCase()}-${String(repoSlug).toLowerCase()}`);
+function lockDir({ workspaceRoot, ref }) {
+  return path.join(workspaceRoot, `.lock-${repoNameOf(ref)}`);
+}
+
+/**
+ * Lowercased `owner-repo` handle for the cache dirs, platform-namespaced for
+ * GitHub (`github-owner-repo`) so a mirrored GitHub acme/widgets never shares
+ * a bare repo / worktree / lock with a Bitbucket ACME/widgets. Bitbucket names
+ * are byte-for-byte unchanged (existing caches stay valid).
+ */
+function repoNameOf(ref) {
+  const slug = `${String(ref?.projectKey).toLowerCase()}-${String(ref?.repoSlug).toLowerCase()}`;
+  return ref?.platform === "github" ? `github-${slug}` : slug;
 }
 
 async function withLock(lock, fn, timeoutMs = 30000) {
@@ -100,7 +111,7 @@ async function withLock(lock, fn, timeoutMs = 30000) {
 
 /** Ensure the bare cache repo exists, configured for this cluster, and fetch the reviewed SHA. */
 async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin, platform }) {
-  const bare = bareRepoDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  const bare = bareRepoDir({ workspaceRoot, ref });
   mkdirSync(path.dirname(bare), { recursive: true });
 
   if (!existsSync(path.join(bare, "HEAD"))) {
@@ -156,7 +167,7 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
 
 /** Attach (or reuse) a detached worktree at the deterministic SHA dir. */
 function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
-  const wt = worktreePath({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug, sha });
+  const wt = worktreePath({ workspaceRoot, ref, sha });
 
   if (existsSync(path.join(wt, ".git"))) return wt; // already a linked worktree
 
@@ -167,7 +178,7 @@ function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
 
 /** Keep only the newest `keep` worktrees per repo; let git prune the rest. */
 async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
-  const bare = bareRepoDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  const bare = bareRepoDir({ workspaceRoot, ref });
   if (!existsSync(path.join(bare, "HEAD"))) return;
 
   const list = git(["--git-dir", bare, "worktree", "list", "--porcelain"]);
@@ -215,16 +226,18 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
   if (!config.checkout?.enabled) return { ok: false, reason: "disabled" };
   if (!sha) return { ok: false, reason: "no reviewed sha" };
   const workspaceRoot = config.dirs.workspaceRoot;
-  const lock = lockDir({ workspaceRoot, projectKey: ref.projectKey, repoSlug: ref.repoSlug });
+  const lock = lockDir({ workspaceRoot, ref });
 
   try {
     // The workspace dir may not exist yet in the pod (only jobs/ is pre-created
     // in the image); the lock + bare repos live under it, so create it first.
     mkdirSync(workspaceRoot, { recursive: true });
-    // Platform-selected backend (github vs bitbucket). A GitHub ref needs the
-    // github block — never silently clone from the Bitbucket host.
+    // Platform-selected backend (github vs bitbucket). loadConfig always builds
+    // a config.github object, so for GitHub refs we must key on the *token*
+    // (absent without GITHUB_TOKEN) rather than on the object — otherwise this
+    // clear refusal could never fire in production.
     const backend = backendConfig(config, ref);
-    if (ref?.platform === "github" && !backend) {
+    if (ref?.platform === "github" && !backend?.token) {
       return { ok: false, reason: "github backend not configured (GITHUB_TOKEN)" };
     }
     return await withLock(lock, async () => {

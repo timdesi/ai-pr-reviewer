@@ -177,7 +177,10 @@ const TEACH_FORCE_REPLY = (short) =>
   `No changes since the last review (same commit \`${short}\`, no new comments), so there was nothing new to check and I skipped a redundant re-review.\n\nTo force a fresh review anyway, comment: \`/ai-review --force\``;
 
 async function replyTeachForce(config, ref, triggerCommentId, previous) {
-  if (config.job.dryRun && ref?.platform !== "github") return;
+  // Only reply when publishing is enabled for the *ref's own platform* — the
+  // per-platform contract (PUBLISH_TO_BITBUCKET / PUBLISH_TO_GITHUB) must not
+  // be bypassed by a GitHub ref while its gate is off.
+  if (!shouldPublish(config, ref)) return;
   const short = previous?.sha ? String(previous.sha).slice(0, 8) : "…";
   try {
     const client = createReviewClient(config, ref);
@@ -459,8 +462,9 @@ export function createServer({ config, port = config.server.port, host = config.
         }
         const raw = await readRawBody(req);
         // GitHub's webhook test button delivers an unsigned `ping` event. It
-        // triggers nothing, so it is accepted without an HMAC check; real
-        // deliveries still require a valid X-Hub-Signature-256.
+        // triggers nothing, so it is accepted without an HMAC check (the
+        // empty-secret guard above has already ruled out a disabled endpoint);
+        // real deliveries still require a valid X-Hub-Signature-256.
         if (String(req.headers["x-github-event"] || "").toLowerCase() === "ping") {
           log.info("webhook: github ping accepted (unsigned test event)");
           return sendJson(res, 200, { ok: true, ignored: "ping" });
@@ -637,24 +641,28 @@ export function createServer({ config, port = config.server.port, host = config.
         // neither can PRs the platform no longer has (404: purged after merge
         // or decline). Fail open on other errors (network etc.) so a lookup
         // outage never blocks the dashboard; the run itself would surface the
-        // error. Bitbucket and GitHub are handled in parallel branches.
-        if (ref.platform === "github" && config.github?.token) {
-          try {
-            const client = createReviewClient(config, ref);
-            const pr = await client.getPullRequest(ref);
-            const st = String(pr?.state || "").toUpperCase();
-            if (["MERGED", "CLOSED"].includes(st)) {
-              return sendJson(res, 409, {
-                error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} is ${st.toLowerCase()} and can no longer be reviewed`,
-              });
+        // error. The platform branch is exclusive: a GitHub ref is only ever
+        // looked up on GitHub (a missing GITHUB_TOKEN skips the gate instead of
+        // leaking the GitHub ref into the Bitbucket lookup).
+        if (ref.platform === "github") {
+          if (config.github?.token) {
+            try {
+              const client = createReviewClient(config, ref);
+              const pr = await client.getPullRequest(ref);
+              const st = String(pr?.state || "").toUpperCase();
+              if (["MERGED", "CLOSED"].includes(st)) {
+                return sendJson(res, 409, {
+                  error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} is ${st.toLowerCase()} and can no longer be reviewed`,
+                });
+              }
+            } catch (err) {
+              if (err?.status === 404 || /does not exist|not found/i.test(err?.message || "")) {
+                return sendJson(res, 409, {
+                  error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} no longer exists in GitHub and can no longer be reviewed`,
+                });
+              }
+              /* other lookup failures are allowed through */
             }
-          } catch (err) {
-            if (err?.status === 404 || /does not exist|not found/i.test(err?.message || "")) {
-              return sendJson(res, 409, {
-                error: `PR ${ref.projectKey}/${ref.repoSlug}#${ref.prId} no longer exists in GitHub and can no longer be reviewed`,
-              });
-            }
-            /* other lookup failures are allowed through */
           }
         } else if (config.bitbucket?.baseUrl && config.bitbucket?.token) {
           try {

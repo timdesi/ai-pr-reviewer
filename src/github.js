@@ -173,7 +173,12 @@ export class GitHubClient {
       if (Array.isArray(page)) out.push(...page);
       const link = headersOut.link || "";
       const m = link.match(/<([^>]+)>;\s*rel="next"/);
-      next = m ? m[1] : null;
+      const nextUrl = m ? m[1] : null;
+      // Never follow a Link header that points off our API host: request()
+      // always sends the bearer token, and it must not reach a foreign origin
+      // (a hostile/misbehaving GHES, or a MITM'd Link header). Drop pagination
+      // rather than leak credentials.
+      next = nextUrl && this.urlBelongs(nextUrl) ? nextUrl : null;
     }
     return out;
   }

@@ -296,8 +296,10 @@ The dashboard server (`npm run ui`) also serves `POST /webhooks/bitbucket` and
 - **Events:** `issue_comment` (created, for `/ai-review`) and `pull_request`
   (opened, ready_for_review, review_requested).
 - **Secret:** the same `GITHUB_WEBHOOK_SECRET` (payloads must carry a valid
-  `X-Hub-Signature-256`, HMAC-SHA256). The unsigned `ping` test event is
-  always acknowledged.
+  `X-Hub-Signature-256`, HMAC-SHA256). While a secret is set, the unsigned
+  `ping` test event is always acknowledged. **Empty secret = the endpoint is
+  disabled** (every delivery returns 403, fail closed) — never "unsigned
+  allowed".
 
 ---
 
