@@ -90,6 +90,19 @@ export class GitHubClient {
 
   async request(pathname, { accept = "application/vnd.github+json", method = "GET", body, headers = {}, raw = false, headersOut = null } = {}) {
     const url = this.url(pathname);
+    // Never send the bearer token to a foreign origin: an absolute URL that is
+    // not on the configured API host is refused up front (mirror of the
+    // getAllPages Link-header guard). All current callers pass relative paths
+    // or already-verified next URLs.
+    if (/^https?:\/\//i.test(url) && !this.urlBelongs(url)) {
+      let foreign;
+      try {
+        foreign = new URL(url).host;
+      } catch {
+        foreign = "<unparseable>";
+      }
+      throw new Error(`github client refuses a foreign host "${foreign}" (configured API host ${new URL(this.baseUrl).host})`);
+    }
     const res = await fetch(url, {
       method,
       headers: {

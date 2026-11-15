@@ -191,6 +191,29 @@ test("pr:review_requested on a still-open draft is ignored (drafts wait)", () =>
   assert.match(r.ignored, /still a draft/);
 });
 
+test("pr:review_requested for a TEAM is ignored even when an allowed user is already requested", () => {
+  // GitHub sends requested_reviewer=null + requested_team for a team request,
+  // while pr.requested_reviewers may still list an allowed user. The old
+  // fallback to requested[0] would have let the team request start a review.
+  const payload = prPayload({ action: "review_requested", requested: ["timdesi"] });
+  payload.requested_reviewer = null;
+  payload.requested_team = { id: 7, name: "reviews-team", slug: "reviews-team" };
+  const r = parseGitHubWebhookRequest({
+    headers: { "x-github-event": "pull_request" },
+    payload,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 200);
+  assert.match(r.ignored, /team was requested/);
+  // An empty allowlist must not start a review for a team request either.
+  const open = parseGitHubWebhookRequest({
+    headers: { "x-github-event": "pull_request" },
+    payload,
+    allowedUsers: [],
+  });
+  assert.equal(open.ok, false);
+});
+
 test("pr:review_requested with no allowlist triggers for any requested reviewer", () => {
   const r = parseGitHubWebhookRequest({
     headers: { "x-github-event": "pull_request" },

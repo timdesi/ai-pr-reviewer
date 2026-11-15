@@ -152,6 +152,32 @@ test("pagination refuses an off-host rel=next Link header (no token leak)", asyn
   }
 });
 
+test("request refuses an absolute foreign URL before fetch (no token leak)", async () => {
+  const stub = stubFetch([]);
+  try {
+    const client = new GitHubClient({ token: "t" });
+    await assert.rejects(
+      () => client.request("https://evil.example/steal"),
+      /foreign host "evil\.example"/,
+    );
+    assert.equal(stub.calls.length, 0, "fetch must never be reached with the token");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("request allows an absolute URL on the configured API host", async () => {
+  const stub = stubFetch([{ url: /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/pulls\/42$/, body: {} }]);
+  try {
+    const client = new GitHubClient({ token: "t" });
+    await client.request(`${API}/repos/acme/widgets/pulls/42`);
+    assert.equal(stub.calls.length, 1);
+    assert.ok(stub.calls[0].url.startsWith(API));
+  } finally {
+    stub.restore();
+  }
+});
+
 test("getUnifiedDiff asks for the .diff media type and returns raw text", async () => {
   const stub = stubFetch([{ url: /\/pulls\/42$/, body: "diff --git a/x b/x\nindex 000..111\n--- a/x\n+++ b/x\n+hello\n" }]);
   try {

@@ -141,7 +141,21 @@ export function parseGitHubWebhookRequest({
       if (pr?.draft === true) {
         return { ok: false, status: 200, ignored: "pull request is still a draft" };
       }
-      const reviewer = payload?.requested_reviewer?.login ?? requested[0] ?? null;
+      // Only an *individual* requested user counts. GitHub puts teams in
+      // `requested_team` with no `requested_reviewer`; falling back to an
+      // already-requested user would let a team request sneak past the
+      // allowlist (and an empty allowlist would start a review with no
+      // reviewer at all). Teams are not gated by ALLOWED_REVIEWER_USERS, so a
+      // team request is ignored here (it can still trigger via the
+      // opened/ready_for_review paths if an allowed user is listed).
+      const reviewer = payload?.requested_reviewer?.login ?? null;
+      if (!reviewer) {
+        return {
+          ok: false,
+          status: 200,
+          ignored: `a team was requested as reviewer for ${label} (only individual requested reviewers are gated)`,
+        };
+      }
       if (!isAllowed(reviewer)) {
         const seen = reviewer || "none";
         return { ok: false, status: 200, ignored: `no allowed user was requested as reviewer for ${label} (requested: ${seen})` };
