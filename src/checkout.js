@@ -65,6 +65,20 @@ export function scmUrl({ baseUrl, projectKey, repoSlug, platform }) {
   return `https://${host}/scm/${String(projectKey).toLowerCase()}/${String(repoSlug).toLowerCase()}.git`;
 }
 
+/**
+ * An https URL with inline Basic-auth credentials (used only as a throwaway
+ * fetch argument — never persisted in the repo config). An empty username
+ * becomes the conventional `x-token-auth` (Bitbucket DC's magic token-user;
+ * an empty web user is invalid). GitHub accepts a PAT as the password either
+ * way.
+ */
+export function basicAuthUrl(raw, username, token) {
+  const u = new URL(raw);
+  u.username = username || "x-token-auth";
+  u.password = token;
+  return u.toString();
+}
+
 function bareRepoDir({ workspaceRoot, ref }) {
   return path.join(workspaceRoot, `${repoNameOf(ref)}.git`);
 }
@@ -140,11 +154,8 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
   // they need no auth.
   const baseUrl2 = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
   if (token && /^https?:/i.test(baseUrl2)) {
-    const u = new URL(baseUrl2);
-    u.username = username;
-    u.password = token;
-    attempts.push([...base, "--depth=1", u.toString(), sha]);
-    if (branch) attempts.push([...base, "--depth=50", u.toString(), branch]);
+    attempts.push([...base, "--depth=1", basicAuthUrl(baseUrl2, username, token), sha]);
+    if (branch) attempts.push([...base, "--depth=50", basicAuthUrl(baseUrl2, username, token), branch]);
   }
 
   // A raw-SHA fetch is refused by some DC versions (and by local file remotes);

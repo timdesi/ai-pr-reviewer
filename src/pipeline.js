@@ -41,6 +41,17 @@ export function sanitize(s) {
   return String(s).replace(/[^A-Za-z0-9._-]+/g, "-");
 }
 
+/**
+ * Deterministic job-name prefix for a ref (`<proj>-<repo>-PR<N>-`). GitHub is
+ * namespaced (`github-…`) so a GitHub owner/repo never shares a job namespace
+ * with a Bitbucket project/repo of the same lowercased name; Bitbucket
+ * prefixes are byte-for-byte unchanged (existing job dirs stay readable).
+ */
+export function jobPrefixFor(ref) {
+  const base = `${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-`;
+  return sanitize(ref?.platform === "github" ? `github-${base}` : base);
+}
+
 // Attach token usage + computed cost to a finished attempt (from runAgent).
 function recordUsageCost(attemptState, res, prices, model) {
   const u = res.usage;
@@ -159,7 +170,7 @@ export async function runReview({ ref, config, options = {} }) {
 
   const from = pullRequest.fromRef || {};
   const reviewedSha = from.latestCommit || from.id;
-  const jobName = sanitize(`${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-${reviewedSha?.slice(0, 8)}`);
+  const jobName = `${jobPrefixFor(ref)}${reviewedSha?.slice(0, 8)}`;
   const jobDir = path.join(jobsDir, jobName);
   mkdirSync(jobDir, { recursive: true });
 
@@ -255,7 +266,7 @@ export async function runReview({ ref, config, options = {} }) {
   // instead of re-raising already-addressed findings. Additive + non-fatal.
   // The previous review is looked up early and reused later for the consensus
   // resolved_previous reconciliation.
-  const jobPrefix = sanitize(`${ref.projectKey}-${ref.repoSlug}-PR${ref.prId}-`);
+  const jobPrefix = jobPrefixFor(ref);
   const previous = findPreviousReview({ jobsDir, jobPrefix, currentJob: jobName });
   const reviewCommentId = previousReviewCommentId(previous, { jobsDir });
   // The PR activity feed is shared by the discussion step (text clarifications)

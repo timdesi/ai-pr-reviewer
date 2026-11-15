@@ -37,7 +37,7 @@ import path from "node:path";
 
 import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
-import { runReview, listJobs, readJobSummary, readJobArtifacts, sanitize } from "./pipeline.js";
+import { runReview, listJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
 import { listPulls, clearPullCache } from "./pulls.js";
 import { computeStats } from "./stats.js";
 import { parseWebhookRequest, verifySignature, isUnsignedDiagnostic, isForceReview } from "./webhook.js";
@@ -197,7 +197,7 @@ async function replyTeachForce(config, ref, triggerCommentId, previous) {
   }
 }
 
-export function createServer({ config, port = config.server.port, host = config.server.host }) {
+export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview } = {}) {
   assertAnyBackendConfig(config);
   const clients = new Set();
   // One review runs at a time; extra requests (webhook or UI) wait in the queue.
@@ -263,7 +263,7 @@ export function createServer({ config, port = config.server.port, host = config.
     const next = state.queue.shift();
     state.runningJob = "starting";
     state.activeRef = next.ref;
-    runReview({
+    reviewRunner({
       ref: next.ref,
       config,
       options: {
@@ -409,7 +409,7 @@ export function createServer({ config, port = config.server.port, host = config.
         // fresh review.
         const forced = parsed.text ? isForceReview(parsed.text) : false;
         if (parsed.head && !forced) {
-          const prefix = sanitize(`${parsed.ref.projectKey}-${parsed.ref.repoSlug}-PR${parsed.ref.prId}-`);
+          const prefix = jobPrefixFor(parsed.ref);
           const previous = findPreviousReview({ jobsDir: config.dirs.jobs, jobPrefix: prefix, currentJob: null });
           if (alreadyReviewedAt(previous, parsed.head)) {
             let newDiscussion = false;
@@ -500,7 +500,7 @@ export function createServer({ config, port = config.server.port, host = config.
         // --force" (or "-force") always runs a fresh review.
         const forced = parsed.text ? isForceReview(parsed.text) : false;
         if (parsed.head && !forced) {
-          const prefix = sanitize(`${parsed.ref.projectKey}-${parsed.ref.repoSlug}-PR${parsed.ref.prId}-`);
+          const prefix = jobPrefixFor(parsed.ref);
           const previous = findPreviousReview({ jobsDir: config.dirs.jobs, jobPrefix: prefix, currentJob: null });
           if (alreadyReviewedAt(previous, parsed.head)) {
             let newDiscussion = false;

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { scmUrl, prepareCheckout } from "../src/checkout.js";
+import { scmUrl, basicAuthUrl, prepareCheckout } from "../src/checkout.js";
 
 const ghRef = { projectKey: "acme", repoSlug: "widgets", prId: 42, platform: "github" };
 
@@ -72,6 +72,20 @@ test("scmUrl keeps the Bitbucket layout when platform is not github", () => {
     scmUrl({ baseUrl: "https://bitbucket.example.com", projectKey: "ACME", repoSlug: "acme-app" }),
     "https://bitbucket.example.com/scm/acme/acme-app.git",
   );
+});
+
+test("basicAuthUrl falls back to x-token-auth when the username is empty", () => {
+  const url = basicAuthUrl("https://github.com/acme/widgets.git", "", "ghp_secret");
+  const u = new URL(url);
+  assert.equal(u.username, "x-token-auth");
+  assert.equal(u.password, "ghp_secret");
+  assert.equal(u.host, "github.com");
+});
+
+test("basicAuthUrl keeps an explicit username and encodes creds safely", () => {
+  const u = new URL(basicAuthUrl("https://github.com/acme/widgets.git", "mybot", "tok"));
+  assert.equal(u.username, "mybot");
+  assert.equal(u.password, "tok");
 });
 
 test("prepareCheckout fetches a GitHub ref through the github config into a worktree", async () => {
