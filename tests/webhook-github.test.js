@@ -181,6 +181,16 @@ test("pr:review_requested with an allowed reviewer starts a review", () => {
   assert.equal(r.reviewer, "timdesi");
 });
 
+test("pr:review_requested on a still-open draft is ignored (drafts wait)", () => {
+  const r = parseGitHubWebhookRequest({
+    headers: { "x-github-event": "pull_request" },
+    payload: prPayload({ action: "review_requested", draft: true }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 200);
+  assert.match(r.ignored, /still a draft/);
+});
+
 test("pr:review_requested with no allowlist triggers for any requested reviewer", () => {
   const r = parseGitHubWebhookRequest({
     headers: { "x-github-event": "pull_request" },

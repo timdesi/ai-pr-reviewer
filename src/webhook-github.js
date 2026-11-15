@@ -136,6 +136,11 @@ export function parseGitHubWebhookRequest({
 
     // Someone was asked to review this PR.
     if (action === "review_requested") {
+      // Drafts wait until marked ready — same rule as opened/ready_for_review
+      // (a reviewer being requested on a draft must not start a review).
+      if (pr?.draft === true) {
+        return { ok: false, status: 200, ignored: "pull request is still a draft" };
+      }
       const reviewer = payload?.requested_reviewer?.login ?? requested[0] ?? null;
       if (!isAllowed(reviewer)) {
         const seen = reviewer || "none";

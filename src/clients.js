@@ -37,13 +37,40 @@ export function botUsernamesOf(config, ref) {
 }
 
 /**
+ * The repo web URL (without /pull/N) from a GitHub REST API base, used when a
+ * GitHub ref has no html_url. `https://api.github.com` ->
+ * `https://github.com`; GHES/GHEC `https://git.example.com/api/v3` ->
+ * `https://git.example.com`.
+ */
+function githubWebRoot(apiBase) {
+  let u;
+  try {
+    u = new URL(String(apiBase || "https://api.github.com"));
+  } catch {
+    return "";
+  }
+  if (u.hostname === "api.github.com") return "https://github.com";
+  const stripped = /\/api(\/v\d+)?$/.test(u.pathname) ? u.pathname.replace(/\/api(\/v\d+)?$/, "") : u.pathname;
+  return `${u.protocol}//${u.host}${stripped}`.replace(/\/+$/, "");
+}
+
+/**
  * The public URL for a published comment on a PR.
- *   - GitHub: the PR's html_url plus the `#issuecomment-<id>` anchor.
+ *   - GitHub: the PR's html_url plus the `#issuecomment-<id>` anchor (falls
+ *     back to the repo's pull page derived from the API base when html_url is
+ *     missing, so the link never falls through to a Bitbucket-style URL on the
+ *     API host).
  *   - Bitbucket: the server URL plus the `?comment=<id>` deep link.
  */
 export function prCommentUrl({ ref, pullRequest, client, commentId }) {
-  if (ref?.platform === "github" && pullRequest?.htmlUrl) {
-    const base = String(pullRequest.htmlUrl).split(/[?#]/)[0];
+  if (ref?.platform === "github") {
+    const hasHtml = Boolean(pullRequest?.htmlUrl);
+    let base = String(pullRequest?.htmlUrl || githubWebRoot(client?.baseUrl)).split(/[?#]/)[0].replace(/\/$/, "");
+    if (!hasHtml) {
+      base = `${base}/${encodeURIComponent(ref.projectKey)}/${encodeURIComponent(
+        ref.repoSlug,
+      )}/pull/${ref.prId}`;
+    }
     return `${base}#issuecomment-${commentId}`;
   }
   const baseUrl = client?.baseUrl || "";

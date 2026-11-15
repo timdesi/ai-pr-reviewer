@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { scmUrl, basicAuthUrl, repoNameOf, prepareCheckout } from "../src/checkout.js";
+import { scmUrl, basicAuthUrl, checkoutUsername, repoNameOf, prepareCheckout } from "../src/checkout.js";
 
 const ghRef = { projectKey: "acme", repoSlug: "widgets", prId: 42, platform: "github" };
 
@@ -74,18 +74,33 @@ test("scmUrl keeps the Bitbucket layout when platform is not github", () => {
   );
 });
 
-test("basicAuthUrl falls back to x-token-auth when the username is empty", () => {
-  const url = basicAuthUrl("https://github.com/acme/widgets.git", "", "ghp_secret");
+test("basicAuthUrl leaves an empty username empty (Bitbucket parity, no fallback here)", () => {
+  // The x-token-auth fallback is scoped to checkoutUsername(GitHub) — basicAuthUrl
+  // itself must keep an empty username empty so the Bitbucket path is unchanged
+  // when BITBUCKET_USERNAME is unset.
+  const url = basicAuthUrl("https://bitbucket.example.com/scm/acme/acme-app.git", "", "tok");
   const u = new URL(url);
-  assert.equal(u.username, "x-token-auth");
-  assert.equal(u.password, "ghp_secret");
-  assert.equal(u.host, "github.com");
+  assert.equal(u.username, "");
+  assert.equal(u.password, "tok");
+  assert.equal(u.host, "bitbucket.example.com");
 });
 
 test("basicAuthUrl keeps an explicit username and encodes creds safely", () => {
   const u = new URL(basicAuthUrl("https://github.com/acme/widgets.git", "mybot", "tok"));
   assert.equal(u.username, "mybot");
   assert.equal(u.password, "tok");
+});
+
+test("checkoutUsername scopes the x-token-auth fallback to GitHub only", () => {
+  // GitHub + no bot username -> the conventional token-user.
+  assert.equal(checkoutUsername("github", ""), "x-token-auth");
+  assert.equal(checkoutUsername("github", undefined), "x-token-auth");
+  assert.equal(checkoutUsername("github", "mybot"), "mybot");
+  // Bitbucket (and default) keep their username byte-for-byte — empty stays empty.
+  assert.equal(checkoutUsername("bitbucket", ""), "");
+  assert.equal(checkoutUsername("bitbucket", "mybot"), "mybot");
+  assert.equal(checkoutUsername(undefined, ""), "");
+  assert.equal(checkoutUsername(undefined, "mybot"), "mybot");
 });
 
 test("prepareCheckout fetches a GitHub ref through the github config into a worktree", async () => {

@@ -68,6 +68,25 @@ test("prCommentUrl: GitHub anchors the PR's own html_url", () => {
   assert.equal(url, "https://github.com/acme/widgets/pull/42#issuecomment-9001");
 });
 
+test("prCommentUrl: GitHub without html_url derives the pull page from the API base", () => {
+  // github.com API base -> github.com web root (no Bitbucket-style fallthrough).
+  const url = prCommentUrl({
+    ref: GH_REF,
+    pullRequest: {},
+    client: { baseUrl: "https://api.github.com/" },
+    commentId: 9001,
+  });
+  assert.equal(url, "https://github.com/acme/widgets/pull/42#issuecomment-9001");
+  // GHES API base -> the GHES web root.
+  const ghes = prCommentUrl({
+    ref: GH_REF,
+    pullRequest: {},
+    client: { baseUrl: "https://git.example.com/api/v3" },
+    commentId: 9001,
+  });
+  assert.equal(ghes, "https://git.example.com/acme/widgets/pull/42#issuecomment-9001");
+});
+
 test("prCommentUrl: Bitbucket deep-links via the server + ?comment=", () => {
   const url = prCommentUrl({
     ref: BB_REF,

@@ -67,16 +67,27 @@ export function scmUrl({ baseUrl, projectKey, repoSlug, platform }) {
 
 /**
  * An https URL with inline Basic-auth credentials (used only as a throwaway
- * fetch argument — never persisted in the repo config). An empty username
- * becomes the conventional `x-token-auth` (Bitbucket DC's magic token-user;
- * an empty web user is invalid). GitHub accepts a PAT as the password either
- * way.
+ * fetch argument — never persisted in the repo config). The username is used
+ * as given, byte-for-byte — the GitHub-only `x-token-auth` fallback lives in
+ * `checkoutUsername`, never here, so the Bitbucket path is unchanged when
+ * BITBUCKET_USERNAME is empty (an empty username maps to an empty username,
+ * matching the pre-adapter behaviour).
  */
 export function basicAuthUrl(raw, username, token) {
   const u = new URL(raw);
-  u.username = username || "x-token-auth";
+  u.username = username;
   u.password = token;
   return u.toString();
+}
+
+/**
+ * The git-auth username for a checkout URL. GitHub clones with no bot username
+ * use `x-token-auth` (the conventional token-user) as the URL username; every
+ * other platform keeps the configured username as-is, so the fallback can never
+ * leak into the Bitbucket path.
+ */
+export function checkoutUsername(platform, username) {
+  return platform === "github" ? username || "x-token-auth" : username;
 }
 
 function bareRepoDir({ workspaceRoot, ref }) {
@@ -258,7 +269,9 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       const bare = await ensureFetched({
         baseUrl: backend.baseUrl,
         token: backend.token,
-        username: backend.username,
+        // GitHub clones with no bot username default to x-token-auth; Bitbucket
+        // keeps its username byte-for-byte (empty stays empty).
+        username: checkoutUsername(ref?.platform, backend.username),
         verifyTls: backend.verifyTls,
         workspaceRoot,
         ref,
