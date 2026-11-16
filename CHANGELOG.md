@@ -1,9 +1,12 @@
 # Changelog — AI PR Reviewer
 
 Release notes for the on-demand AI pull-request reviewer for Bitbucket Data
-Center. Early images were tagged `v1.x`, later releases track the app version
-(`v0.2.y` → `v0.4.x`); both series belong to the same project and are listed
-below in chronological order.
+Center and GitHub (GitHub support arrived in v0.5.0).
+
+Versioning note: early container images were tagged `v1.x`; later releases track
+the app version (`v0.2.y` → `v0.5.x`). Both series belong to the same project.
+Newest entries come first, so the older `v1.x` image tags appear further down,
+below the `v0.2.x` entries.
 
 ---
 
@@ -32,7 +35,8 @@ below in chronological order.
   enriched with its own platform's client (head SHA, new commits, state —
   `MERGED`/`CLOSED` GitHub PRs are dimmed like merged/declined Bitbucket PRs).
 - **Operational knobs:** `REVIEWER_PARALLELISM` (0 = parallel default, 1 =
-  strictly serial for small hosts) and a GitHub-only `.env` profile for the VM.
+  strictly serial for small hosts) and a GitHub-only `.env` profile for small
+  single-host setups.
 
 ### Live proof — GitHub backend end-to-end on real infra (2026-11-15)
 
@@ -47,8 +51,8 @@ below in chronological order.
   implements the service mode.
 - **`docker/opencode.json.template` is a skeleton, not a ready config:**
   materializing it needs the `llm-gateway.example.com` host replaced **and** the
-  `providers/example/msp` path tenant replaced with the real farm value — missing
-  the tenant swap makes every `llmgw-msp/*` model answer HTTP 404
+  `providers/example/msp` path segment replaced with your gateway's own tenant
+  path — missing that swap makes every `llmgw-msp/*` model answer HTTP 404
   ("Resource not found").
 - **Serial reviewers validated on a 1-vCPU host** (`REVIEWER_PARALLELISM=1`):
   DeepSeek Flash, Qwen and GPT-6 Luna each completed in tens of seconds per stage
@@ -117,7 +121,7 @@ below in chronological order.
   `llmgw-gpt/gpt-6-luna`) into a `PR screenshots (transcribed)`
   block attached to both reviewer and consensus contexts.
 - Works because Bitbucket serves attachments via the REST endpoint with the
-  existing bearer token (no extra SSO).
+  existing bearer token (no extra sign-in).
 - Unreadable/oversized images degrade to an explicit "N screenshots not
   viewable — ask the author" note, never an error.
 - Flags: `FETCH_PR_IMAGES=1` (default on), `VISION_MODEL`,
@@ -159,7 +163,7 @@ below in chronological order.
   real deployment caps at **262 144**, so a near-max output request was rejected
   before any tool call.
 - The model limit is now context 262 144 / output 131 072, matching the real
-  deployment window. Verified in the pod: reviewer A runs to completion.
+  deployment window. Verified in the container: reviewer A runs to completion.
 
 ## v0.3.3 — 2026-11-04 — Release batch
 
@@ -169,16 +173,15 @@ below in chronological order.
   skipped; if that review was a held dry-run (UI preview only), it is delivered
   to Bitbucket when the same head later gets a reviewer.
 - **Allowlist simplify:** auto-review is now ON for every repository by default,
-  off only for repos on `AUTO_REVIEW_OFF_REPOS`. Onboarding a repo =
-  `scripts/reviewer-repo.sh --repo PROJECT/foo --webhook`.
+  off only for repos on `AUTO_REVIEW_OFF_REPOS`. Onboarding a repo is
+  just adding the webhook.
 - **Model cleanup:** two retired Claude variants removed from the config.
 
-## v0.3.2 — 2026-11-01 — SSO sidecar removed; repo onboarding script
+## v0.3.2 — 2026-11-01 — Auth sidecar removed
 
-- The oauth2-proxy UI SSO sidecar was dropped as unnecessary — back to a simple
-  single-container deployment; `UI_AUTH_*`/`OAUTH2_PROXY_*` code removed.
-- New repositories are onboarded with `scripts/reviewer-repo.sh --repo
-  PROJECT/foo --copy PROJECT/main --webhook`.
+- The separate UI authentication sidecar was dropped as unnecessary — back to a
+  simple single-container deployment; the related `UI_AUTH_*`/`OAUTH2_PROXY_*`
+  code was removed.
 
 ## v0.3.1 — Severity color fix
 
@@ -273,8 +276,9 @@ jobs; every issue below was fixed:
   intent and acceptance criteria.
 - Additive and non-fatal: disabled unless `JIRA_ENABLED=1` and a token is
   present; any fetch failure just skips the block.
-- Enablement required network egress to the tracker host and adding it to
-  `NO_PROXY` so Jira is fetched direct (bypassing the SSO egress proxy).
+- Enablement requires network access from the server to the Jira host (and, if
+  you use an outbound proxy, adding that host to `NO_PROXY` so Jira is fetched
+  directly).
 
 ## v1.5 — UI model switcher + persistence
 
@@ -283,12 +287,13 @@ jobs; every issue below was fixed:
   assignment; `PUT /api/models` validates and persists; `POST /api/review`
   accepts a per-review `models` override.
 - The dashboard header gains a **Models ▾** panel: four dropdowns + **Save as
-  defaults** (persisted on the PVC, survive restarts, apply to webhook-triggered
-  runs). Resolution: per-review override > persisted settings > ConfigMap env.
+  defaults** (persisted on the data volume, survive restarts, apply to
+  webhook-triggered runs). Resolution: per-review override > persisted settings >
+  environment config.
 
 ## v1.4 — Native providers + LLM Gateway MSP
 
-- opencode bundled binary updated so the pod runs the same **native provider
+- opencode bundled binary updated so the container runs the same **native provider
   packages** as a local install (azure, google-vertex, AI SDK); config template
   migrated to the native V2 provider shape.
 - The Anthropic provider moved to the native `llmgw` Google-Vertex path.
@@ -342,7 +347,7 @@ jobs; every issue below was fixed:
 
 ## v1.0 — First deployed review pipeline
 
-- On-demand AI PR review as a service on Kubernetes/OpenShift: Bitbucket
+- On-demand AI PR review as a containerised service: Bitbucket
   webhook → fetch PR + diff → **three reviewers in parallel (A/B/C)** + **one
   consensus agent** → one combined summary comment posted back to the PR.
 - Model assignment, diff-only analysis (before project context/checkout),
@@ -359,9 +364,9 @@ jobs; every issue below was fixed:
 
 ## Concept
 
-Built for **Bitbucket Data Center 9.4.x**, published as
-[an on-demand service](https://github.com/timdesi/ai-pr-reviewer): anyone on
-the allowlist triggers a review with an `/ai-review` comment on a PR; a
+Built for **Bitbucket Data Center 9.4.x** and **GitHub**, run as an on-demand
+service: anyone on the allowlist triggers a review with an `/ai-review` comment
+on a PR; a
 reviewer «added» / PR open / draft-marked-ready event can auto-start one as
 well. Reviews are advisory and read-only — the service never opens a PR, never
 modifies code, only posts one summary comment per review.

@@ -96,4 +96,4 @@ Webhook → `POST /webhooks/bitbucket`; events: `pr:comment:added`,
 
 ---
 
-*Repo docs: `docs/` · printable leaflet: `leaflet/` · pitch deck: `presentation/`*
+*Repo docs: `docs/` · printable leaflet: `leaflet/`*
