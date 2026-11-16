@@ -13,7 +13,7 @@ const API_VERSION = "2025-04-01-preview";
 const DEPLOYMENTS_ROUTE = "/api/openai/deployments/";
 
 const DEFAULT_BASE_URL =
-  "https://llm-gateway.example.com/api/openai/deployments/deepseek-v4-pro-2026-04-23";
+  "https://llm-gateway.example.com/api/openai/deployments/deepseek-v4-pro";
 
 // gpt-* models on the farm need body adaptations on the chat-completions route:
 //   1. `max_tokens` is rejected — they require `max_completion_tokens` (the AI SDK's
@@ -74,10 +74,10 @@ function build(options = {}) {
     ...options,
     fetch: fetcher,
     baseURL: options.baseURL ?? DEFAULT_BASE_URL,
-    apiKey: options.apiKey ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.BMF_API_KEY,
+    apiKey: options.apiKey ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.LLM_GATEWAY_API_KEY,
   });
 }
 
-export const aifarmOpenAI = build();
-export const createAifarmOpenAI = build;
+export const llmgwOpenAI = build();
+export const createLlmgwOpenAI = build;
 export default build;

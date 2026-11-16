@@ -163,13 +163,22 @@ npm run build:agents      # regenerate reviewer agents from prompts/
 A ready-to-build container image ships with the repository:
 
 ```bash
-docker build --build-arg APP_VERSION=0.4.2 -t ai-pr-reviewer .
+docker build --build-arg APP_VERSION=0.5.0 -t ai-pr-reviewer .
 ```
 
 The image bundles Node 22, opencode, and ripgrep, runs as a non-root user,
 and fetches all runtime dependencies during the build. It is configured
 entirely through environment variables; see `.env.example`. Point it at
 your own Bitbucket, model gateway, and container registry.
+
+> **Shipping note.** The production Bitbucket deployment is built from an
+> **assembled pack**: this repository's code combined with internal-only build
+> assets (bundled binaries, prebuilt providers, and the real runtime template —
+> including the model-farm host and tenant) that cannot be published here. The
+> public `Dockerfile` and `docker/opencode.json.template` are therefore
+> placeholders suited to normal online builds; the production pack builds
+> against the real configuration. Contact the maintainers for the assembled
+> pack and its build/push/roll-out steps.
 
 ## Project layout
 

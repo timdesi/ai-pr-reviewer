@@ -94,9 +94,9 @@ test("isTranslationReview matches when any path hits any pattern", () => {
 });
 
 test("loadConfig reads REVIEWER_MODEL_D and defaults translation patterns", () => {
-  withEnv({ REVIEWER_MODEL_D: "aifarm-openai/deepseek-v4-pro-2026-04-23" }, () => {
+  withEnv({ REVIEWER_MODEL_D: "llmgw-openai/deepseek-v4-pro" }, () => {
     const config = loadConfig({ envFile: "/nonexistent/none.env" });
-    assert.equal(config.models.reviewerD, "aifarm-openai/deepseek-v4-pro-2026-04-23");
+    assert.equal(config.models.reviewerD, "llmgw-openai/deepseek-v4-pro");
     assert.ok(config.review.translationPathPatterns.length >= 1);
   });
 });

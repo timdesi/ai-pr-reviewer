@@ -24,7 +24,7 @@ test("loadModelPrices builds provider/model map from cost metadata", () => {
           "discretestack-stable": {}, // no cost -> skipped
         },
       },
-      "aifarm-anthropic": {
+      "llmgw-anthropic": {
         models: {
           "claude-haiku-5-5": { cost: { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 } },
         },
@@ -38,7 +38,7 @@ test("loadModelPrices builds provider/model map from cost metadata", () => {
     cacheRead: 0.07,
     cacheWrite: 0.35,
   });
-  assert.deepEqual(prices["aifarm-anthropic/claude-haiku-5-5"], {
+  assert.deepEqual(prices["llmgw-anthropic/claude-haiku-5-5"], {
     input: 0.1,
     output: 0.5,
     cacheRead: 0.01,
@@ -57,12 +57,12 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
           },
         },
       },
-      "aifarm-msp": {
+      "llmgw-msp": {
         models: {
-          "zai-glm-52": {
+          "glm-52": {
             cost: { input: 0.418, output: 1.338, cache: { read: 0.078, write: 0.418 } },
           },
-          "glm-5-maas": { modelID: "zai-org/glm-5-maas", cost: { input: 0.5, output: 1.5 } },
+          "glm-5": { modelID: "zai-org/glm-5", cost: { input: 0.5, output: 1.5 } },
         },
       },
     },
@@ -74,14 +74,14 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
     cacheRead: 0.07,
     cacheWrite: 0.35,
   });
-  assert.deepEqual(prices["aifarm-msp/zai-glm-52"], {
+  assert.deepEqual(prices["llmgw-msp/glm-52"], {
     input: 0.418,
     output: 1.338,
     cacheRead: 0.078,
     cacheWrite: 0.418,
   });
   // Keyed by the config key (not modelID) so it matches the pipeline's --model ref.
-  assert.deepEqual(prices["aifarm-msp/glm-5-maas"], {
+  assert.deepEqual(prices["llmgw-msp/glm-5"], {
     input: 0.5,
     output: 1.5,
     cacheRead: 0,
@@ -95,16 +95,16 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
 test("listAvailableModels enumerates provider/model ids (V2 + V1, both shapes)", () => {
   const file = tmpConfig({
     providers: {
-      aifarm: { models: { "claude-haiku-5-5": { name: "Claude Haiku 5.5" }, "claude-opus-5-5": {} } },
-      "aifarm-msp": { models: { "zai-glm-52": { name: "z.AI GLM-5.2" }, "glm-5-maas": { modelID: "zai-org/glm-5-maas" } } },
+      llmgw: { models: { "claude-haiku-5-5": { name: "Claude Haiku 5.5" }, "claude-opus-5-5": {} } },
+      "llmgw-msp": { models: { "glm-52": { name: "GLM-5" }, "glm-5": { modelID: "zai-org/glm-5" } } },
     },
   });
   const models = listAvailableModels([file]);
   assert.deepEqual(models, [
-    { id: "aifarm-msp/glm-5-maas", name: "glm-5-maas", image: false }, // no explicit name -> key
-    { id: "aifarm-msp/zai-glm-52", name: "z.AI GLM-5.2", image: false },
-    { id: "aifarm/claude-haiku-5-5", name: "Claude Haiku 5.5", image: false },
-    { id: "aifarm/claude-opus-5-5", name: "claude-opus-5-5", image: false },
+    { id: "llmgw-msp/glm-5", name: "glm-5", image: false }, // no explicit name -> key
+    { id: "llmgw-msp/glm-52", name: "GLM-5", image: false },
+    { id: "llmgw/claude-haiku-5-5", name: "Claude Haiku 5.5", image: false },
+    { id: "llmgw/claude-opus-5-5", name: "claude-opus-5-5", image: false },
   ]);
   // Legacy V1 shape + graceful fallback.
   const legacy = tmpConfig({ provider: { p: { models: { m: { cost: {} } } } } });
@@ -116,7 +116,7 @@ test("listAvailableModels enumerates provider/model ids (V2 + V1, both shapes)",
 test("listAvailableModels flags image input from capabilities", () => {
   const file = tmpConfig({
     providers: {
-      aifarm: {
+      llmgw: {
         models: {
           "claude-haiku-5-5": { capabilities: { input: ["text", "image"], output: ["text"] } },
           "claude-opus-5-5": { capabilities: { input: ["text"], output: ["text"] } },
@@ -126,31 +126,31 @@ test("listAvailableModels flags image input from capabilities", () => {
     },
   });
   const byId = Object.fromEntries(listAvailableModels([file]).map((m) => [m.id, m]));
-  assert.equal(byId["aifarm/claude-haiku-5-5"].image, true);
-  assert.equal(byId["aifarm/claude-opus-5-5"].image, false);
-  assert.equal(byId["aifarm/bare"].image, false, "no capabilities -> not image-capable");
+  assert.equal(byId["llmgw/claude-haiku-5-5"].image, true);
+  assert.equal(byId["llmgw/claude-opus-5-5"].image, false);
+  assert.equal(byId["llmgw/bare"].image, false, "no capabilities -> not image-capable");
 });
 
 test("loadModelBaseUrls: provider-level base URL, per-model overrides", () => {
   const file = tmpConfig({
     providers: {
-      "aifarm-msp": {
+      "llmgw-msp": {
         settings: { baseURL: "https://farm/msp/glm-5.2/v1" },
         models: {
-          "zai-glm-52": {},
-          "Qwen-38-27B": { settings: { baseURL: "https://farm/msp/qwen3.8-27b/v1" } },
+          "glm-52": {},
+          "Qwen-27B": { settings: { baseURL: "https://farm/msp/qwen-27b/v1" } },
         },
       },
-      "aifarm-openai": {
+      "llmgw-openai": {
         settings: { baseURL: "https://farm/api/openai" },
-        models: { "deepseek-v4-pro-2026-04-23": {} },
+        models: { "deepseek-v4-pro": {} },
       },
     },
   });
   assert.deepEqual(loadModelBaseUrls([file]), {
-    "aifarm-msp/zai-glm-52": "https://farm/msp/glm-5.2/v1",
-    "aifarm-msp/Qwen-38-27B": "https://farm/msp/qwen3.8-27b/v1",
-    "aifarm-openai/deepseek-v4-pro-2026-04-23": "https://farm/api/openai",
+    "llmgw-msp/glm-52": "https://farm/msp/glm-5.2/v1",
+    "llmgw-msp/Qwen-27B": "https://farm/msp/qwen-27b/v1",
+    "llmgw-openai/deepseek-v4-pro": "https://farm/api/openai",
   });
   assert.deepEqual(loadModelBaseUrls(["/nonexistent/config.json"]), {});
   assert.deepEqual(loadModelBaseUrls([tmpConfig({ providers: { p: { models: { m: {} } } } })]), {}); // no baseURL anywhere

@@ -48,7 +48,7 @@ below in chronological order.
 - **`docker/opencode.json.template` is a skeleton, not a ready config:**
   materializing it needs the `llm-gateway.example.com` host replaced **and** the
   `providers/example/msp` path tenant replaced with the real farm value — missing
-  the tenant swap makes every `aifarm-msp/*` model answer HTTP 404
+  the tenant swap makes every `llmgw-msp/*` model answer HTTP 404
   ("Resource not found").
 - **Serial reviewers validated on a 1-vCPU host** (`REVIEWER_PARALLELISM=1`):
   DeepSeek Flash, Qwen and GPT-6 Luna each completed in tens of seconds per stage
@@ -85,7 +85,7 @@ below in chronological order.
 - **Models ▾ dialog gained a Vision (screenshots) slot**, persisted like the
   other defaults. The picker is gated on true image capability, not on the
   HTTP route: image-capable models only (Claude Haiku 5.5, GPT-6 Luna,
-  Qwen 3.8 27B); text-only models are excluded and rejected.
+  Qwen 27B); text-only models are excluded and rejected.
 - **Model catalog shrink:** two disabled models removed from the bundled
   config; the catalog is exactly the reachable set.
 
@@ -114,7 +114,7 @@ below in chronological order.
   (Bitbucket `attachment:` refs, direct http(s) URLs, or data-URIs) — no longer
   blindly text-only.
 - A vision-capable model transcribes each image (`VISION_MODEL`, default
-  `aifarm-gpt/gpt-6-luna-2026-09-22`) into a `PR screenshots (transcribed)`
+  `llmgw-gpt/gpt-6-luna`) into a `PR screenshots (transcribed)`
   block attached to both reviewer and consensus contexts.
 - Works because Bitbucket serves attachments via the REST endpoint with the
   existing bearer token (no extra SSO).
@@ -154,7 +154,7 @@ below in chronological order.
 
 ## v0.3.4 — 2026-11-06 — DeepSeek V4 Flash fix (Reviewer A unblocked)
 
-- Reviewer A (`aifarm-msp/DeepSeek-V4-Flash-0731`) failed every attempt with
+- Reviewer A (`llmgw-msp/DeepSeek-V4-Flash`) failed every attempt with
   HTTP 400: the template advertised a larger context window than the model's
   real deployment caps at **262 144**, so a near-max output request was rejected
   before any tool call.
@@ -286,14 +286,14 @@ jobs; every issue below was fixed:
   defaults** (persisted on the PVC, survive restarts, apply to webhook-triggered
   runs). Resolution: per-review override > persisted settings > ConfigMap env.
 
-## v1.4 — Native providers + AI Farm MSP
+## v1.4 — Native providers + LLM Gateway MSP
 
 - opencode bundled binary updated so the pod runs the same **native provider
   packages** as a local install (azure, google-vertex, AI SDK); config template
   migrated to the native V2 provider shape.
-- The Anthropic provider moved to the native `aifarm` Google-Vertex path.
-- Added the **`aifarm-msp`** provider: z.AI GLM-5.2, DeepSeek-V4-Flash-0731,
-  Qwen-38-27B, authenticated with the existing auth token (no extra key).
+- The Anthropic provider moved to the native `llmgw` Google-Vertex path.
+- Added the **`llmgw-msp`** provider: GLM-5, DeepSeek-V4-Flash,
+  Qwen-27B, authenticated with the existing auth token (no extra key).
 
 ## v1.3 — Cost tracking
 

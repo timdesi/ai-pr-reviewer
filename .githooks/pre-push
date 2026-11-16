@@ -3,7 +3,7 @@
 # Enable: git config core.hooksPath .githooks
 set -euo pipefail
 
-BANNED='(socialcoding|rb-tracker|rb-proxy|rb-artifactory|bosch|procon|@bosch|3fc41f2708|Desislav)'
+BANNED='(socialcoding|rb-tracker|rb-proxy|rb-artifactory|bosch|procon|@bosch|3fc41f2708|Desislav|aifarm|aoai|bmf|bosch-temp|2026-09-22|2026-04-23|zai-glm|glm-5-maas)'
 ZERO=0000000000000000000000000000000000000000
 
 while read -r _local _lsha _remote _rsha; do

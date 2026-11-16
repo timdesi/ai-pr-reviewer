@@ -262,9 +262,9 @@ export function loadConfig({ envFile } = {}) {
       // "screenshots not viewable — ask the author" note, never an error.
       fetchPrImages: bool("FETCH_PR_IMAGES", true),
       // Vision model used for the transcription (OpenAI-compatible image input).
-      // Default: GPT-6 Luna on the AI Farm (azure deployments route). Swappable
+      // Default: GPT-6 Luna on the LLM Gateway (azure deployments route). Swappable
       // without a rebuild.
-      visionModel: str("VISION_MODEL", "aifarm-gpt/gpt-6-luna-2026-09-22"),
+      visionModel: str("VISION_MODEL", "llmgw-gpt/gpt-6-luna"),
       // Safety caps for the image step: max images transcribed per review, max
       // bytes per download, and per-call timeouts.
       visionMaxImages: num("VISION_MAX_IMAGES", 6),

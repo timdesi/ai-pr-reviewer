@@ -1228,14 +1228,14 @@ const AGENT_KEYS = ["a", "b", "c", "d", "consensus"];
 const MODEL_OVERRIDES = {
   "myprovider/discretestack-stable-fast": "DiscreteStack Stable Fast",
   "myprovider/discretestack-stable": "DiscreteStack Stable",
-  "aifarm-anthropic/claude-haiku-5-5": "Claude Haiku 5.5",
-  "aifarm/claude-haiku-5-5": "Claude Haiku 5.5",
-  "aifarm-gpt/gpt-6-luna-2026-09-22": "GPT-6 Luna",
-  "aifarm-openai/deepseek-v4-pro-2026-04-23": "DeepSeek V4 Pro",
-  "aifarm-msp/zai-glm-52": "z.AI GLM-5.2 (MSP)",
-  "aifarm-msp/DeepSeek-V4-Flash-0731": "DeepSeek V4 Flash (MSP)",
-  "aifarm-msp/Qwen-38-27B": "Qwen 3.8 27B (MSP)",
-  "aifarm-deepseek-flash/deepseek-v4-flash-2026-04-23": "DeepSeek V4 Flash",
+  "llmgw-anthropic/claude-haiku-5-5": "Claude Haiku 5.5",
+  "llmgw/claude-haiku-5-5": "Claude Haiku 5.5",
+  "llmgw-gpt/gpt-6-luna": "GPT-6 Luna",
+  "llmgw-openai/deepseek-v4-pro": "DeepSeek V4 Pro",
+  "llmgw-msp/glm-52": "GLM-5 (MSP)",
+  "llmgw-msp/DeepSeek-V4-Flash": "DeepSeek V4 Flash (MSP)",
+  "llmgw-msp/Qwen-27B": "Qwen 27B (MSP)",
+  "llmgw-deepseek-flash/deepseek-v4-flash": "DeepSeek V4 Flash",
 };
 
 function friendlyModel(id) {

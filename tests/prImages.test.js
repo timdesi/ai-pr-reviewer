@@ -8,7 +8,7 @@ const BOT = "mybot@example.com";
 const baseConfig = {
   review: {
     fetchPrImages: true,
-    visionModel: "aifarm-gpt/gpt-6-luna-2026-09-22",
+    visionModel: "llmgw-gpt/gpt-6-luna",
     visionMaxImages: 6,
     visionMaxImageBytes: 10 * 1024 * 1024,
     visionFetchTimeoutMs: 5000,
@@ -175,16 +175,16 @@ test("loadScreenshotBlock: oversized / non-image downloads are unreadable", asyn
 
 // --- vision routing ----------------------------------------------------------
 
-test("visionRoute maps aifarm-gpt to the Azure deployments route", () => {
-  const r = visionRoute("aifarm-gpt/gpt-6-luna-2026-09-22");
+test("visionRoute maps llmgw-gpt to the Azure deployments route", () => {
+  const r = visionRoute("llmgw-gpt/gpt-6-luna");
   assert.ok(r);
-  assert.match(r.url, /\/api\/openai\/deployments\/gpt-6-luna-2026-09-22\/chat\/completions\?api-version=2025-04-01-preview$/);
-  assert.equal(r.model, "gpt-6-luna-2026-09-22");
+  assert.match(r.url, /\/api\/openai\/deployments\/gpt-6-luna\/chat\/completions\?api-version=2025-04-01-preview$/);
+  assert.equal(r.model, "gpt-6-luna");
 });
 
-test("visionRoute: bare id defaults to aifarm-gpt; aifarm/claude maps to the Anthropic route; others are null", () => {
-  assert.equal(visionRoute("gpt-6-luna-2026-09-22").model, "gpt-6-luna-2026-09-22");
-  const anthropic = visionRoute("aifarm/claude-haiku-5-5");
+test("visionRoute: bare id defaults to llmgw-gpt; llmgw/claude maps to the Anthropic route; others are null", () => {
+  assert.equal(visionRoute("gpt-6-luna").model, "gpt-6-luna");
+  const anthropic = visionRoute("llmgw/claude-haiku-5-5");
   assert.ok(anthropic);
   assert.equal(anthropic.kind, "anthropic");
   assert.equal(anthropic.model, "claude-haiku-5-5");
@@ -193,17 +193,17 @@ test("visionRoute: bare id defaults to aifarm-gpt; aifarm/claude maps to the Ant
   assert.equal(visionRoute(""), null);
 });
 
-test("visionRoute: aifarm-msp uses the model's per-model base URL from the config", () => {
-  assert.equal(visionRoute("aifarm-msp/Qwen-38-27B"), null, "no base-URL map -> unroutable");
-  const bases = { "aifarm-msp/Qwen-38-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen3.8-27b/v1/" };
-  const r = visionRoute("aifarm-msp/Qwen-38-27B", bases);
+test("visionRoute: llmgw-msp uses the model's per-model base URL from the config", () => {
+  assert.equal(visionRoute("llmgw-msp/Qwen-27B"), null, "no base-URL map -> unroutable");
+  const bases = { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" };
+  const r = visionRoute("llmgw-msp/Qwen-27B", bases);
   assert.ok(r);
   assert.equal(r.kind, "openai");
-  assert.equal(r.model, "Qwen-38-27B");
-  assert.equal(r.url, "https://llm-gateway.example.com/api/providers/example/msp/qwen3.8-27b/v1/chat/completions");
+  assert.equal(r.model, "Qwen-27B");
+  assert.equal(r.url, "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/chat/completions");
 });
 
-test("transcribeImage routes aifarm-msp to the per-model chat/completions endpoint", async () => {
+test("transcribeImage routes llmgw-msp to the per-model chat/completions endpoint", async () => {
   const seen = [];
   const orig = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -218,15 +218,15 @@ test("transcribeImage routes aifarm-msp to the per-model chat/completions endpoi
   process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
     const out = await transcribeImage({
-      model: "aifarm-msp/Qwen-38-27B",
+      model: "llmgw-msp/Qwen-27B",
       imageBytes: Buffer.from("png"),
       mimeType: "image/png",
-      baseUrls: { "aifarm-msp/Qwen-38-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen3.8-27b/v1/" },
+      baseUrls: { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" },
     });
     assert.equal(out.text, "qwen read it");
     assert.deepEqual(out.usage, { input: 9, output: 3 });
     assert.equal(seen.length, 1);
-    assert.match(seen[0].url, /qwen3\.8-27b\/v1\/chat\/completions$/);
+    assert.match(seen[0].url, /qwen-27b\/v1\/chat\/completions$/);
     assert.ok(seen[0].hasImage);
   } finally {
     globalThis.fetch = orig;
@@ -251,7 +251,7 @@ test("transcribeImage posts the image and returns { text, usage } parsed from th
   };
   process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "aifarm-gpt/gpt-6-luna-2026-09-22", imageBytes: Buffer.from("png"), mimeType: "image/png" });
+    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("png"), mimeType: "image/png" });
     assert.equal(out.text, "verified 5 rows");
     assert.deepEqual(out.usage, { input: 120, output: 40 });
     assert.equal(seen.length, 1);
@@ -262,7 +262,7 @@ test("transcribeImage posts the image and returns { text, usage } parsed from th
   }
 });
 
-test("transcribeImage speaks the Anthropic messages format over :rawPredict (aifarm/claude-*)", async () => {
+test("transcribeImage speaks the Anthropic messages format over :rawPredict (llmgw/claude-*)", async () => {
   const seen = [];
   const orig = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -270,7 +270,7 @@ test("transcribeImage speaks the Anthropic messages format over :rawPredict (aif
       url: String(url),
       body: JSON.parse(init.body),
       hasB64: String(init.body).includes('"data":"'),
-      sticky: init.headers["x-bmf-sticky-session-instance"],
+      sticky: init.headers["x-sticky-session-instance"],
     });
     return {
       ok: true,
@@ -284,7 +284,7 @@ test("transcribeImage speaks the Anthropic messages format over :rawPredict (aif
   };
   process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "aifarm/claude-haiku-5-5", imageBytes: Buffer.from("png"), mimeType: "image/png" });
+    const out = await transcribeImage({ model: "llmgw/claude-haiku-5-5", imageBytes: Buffer.from("png"), mimeType: "image/png" });
     assert.equal(out.text, "screenshot shows the login form");
     assert.deepEqual(out.usage, { input: 150, output: 30 });
     assert.equal(seen.length, 1);
@@ -303,7 +303,7 @@ test("transcribeImage speaks the Anthropic messages format over :rawPredict (aif
 });
 
 test("transcribeImage returns null without a token, on route miss, or with no text (never throws)", async () => {
-  assert.equal(await transcribeImage({ model: "aifarm-gpt/gpt-6-luna-2026-09-22", imageBytes: Buffer.from("x") }), null); // no token
+  assert.equal(await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") }), null); // no token
   assert.equal(await transcribeImage({ model: "acme/bogus-1", imageBytes: Buffer.from("x") }), null); // not routable
   // Text-only response without usage -> { text, usage: null }.
   const orig = globalThis.fetch;
@@ -314,7 +314,7 @@ test("transcribeImage returns null without a token, on route miss, or with no te
   });
   process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "aifarm-gpt/gpt-6-luna-2026-09-22", imageBytes: Buffer.from("x") });
+    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") });
     assert.equal(out.text, "ok");
     assert.equal(out.usage, null);
   } finally {

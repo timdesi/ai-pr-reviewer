@@ -1,9 +1,9 @@
 {
-  "name": "opencode-aifarm-anthropic",
+  "name": "opencode-llmgw-openai",
   "version": "1.0.0",
   "type": "module",
   "main": "index.mjs",
   "dependencies": {
-    "@ai-sdk/google-vertex": "5.0.87"
+    "@ai-sdk/openai-compatible": "^3.0.52"
   }
 }

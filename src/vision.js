@@ -2,11 +2,11 @@
 // into a PR (description or comments) into text the reviewers can read.
 //
 // Mirrors the farm routes used by the bundled OpenCode providers: the
-// Azure-style deployment route (docker/providers/aifarm-openai) sends an OpenAI
+// Azure-style deployment route (docker/providers/llmgw-openai) sends an OpenAI
 // messages payload whose user turn carries an `image_url` data URI; the
-// `aifarm` provider (docker/providers/aifarm-anthropic) speaks the Anthropic
+// `llmgw` provider (docker/providers/llmgw-anthropic) speaks the Anthropic
 // Messages API over Vertex `:rawPredict`; the MSP models (docker providers /
-// `aifarm-msp`) are served from their own per-model base URLs, declared in the
+// `llmgw-msp`) are served from their own per-model base URLs, declared in the
 // opencode config and handed in as `baseUrls`. All accept a static farm bearer
 // token. The model + endpoint are swappable via VISION_MODEL (src/config.js);
 //
@@ -36,30 +36,30 @@ const VISION_PROMPT =
  * Azure deployments gateway.
  * Returns `{ url, token, model, kind }` or null when the model is not routable
  * for images here. `kind` is `"openai"` (chat-completions body) or
- * `"anthropic"` (Vertex `:rawPredict` + Anthropic Messages format, the `aifarm`
+ * `"anthropic"` (Vertex `:rawPredict` + Anthropic Messages format, the `llmgw`
  * provider). Callers marshal the body/parse the response per kind.
  */
 export function visionRoute(model, baseUrls = {}) {
   const m = String(model || "").trim();
   if (!m) return null;
-  const [provider, key] = m.includes("/") ? m.split("/") : ["aifarm-gpt", m];
+  const [provider, key] = m.includes("/") ? m.split("/") : ["llmgw-gpt", m];
   if (!key) return null;
   const azureRoutes = new Set([
-    "aifarm-gpt",
-    "aifarm-openai",
-    "aifarm-deepseek-flash",
+    "llmgw-gpt",
+    "llmgw-openai",
+    "llmgw-deepseek-flash",
   ]);
   if (azureRoutes.has(provider)) {
     return {
       url: `${AI_FARM_BASE}/api/openai/deployments/${encodeURIComponent(key)}/chat/completions?api-version=${API_VERSION}`,
-      token: process.env.ANTHROPIC_AUTH_TOKEN || process.env.BMF_API_KEY || "",
+      token: process.env.ANTHROPIC_AUTH_TOKEN || process.env.LLM_GATEWAY_API_KEY || "",
       model: key,
       kind: "openai",
     };
   }
-  // Anthropic-style models on the farm (`aifarm/claude-*`) speak the Messages
+  // Anthropic-style models on the farm (`llmgw/claude-*`) speak the Messages
   // API over Vertex `:rawPredict` — the same static farm token used above.
-  if (provider === "aifarm") {
+  if (provider === "llmgw") {
     return {
       url: `${AI_FARM_BASE}/api/google/v1/publishers/anthropic/models/${encodeURIComponent(key)}:rawPredict`,
       token: process.env.ANTHROPIC_AUTH_TOKEN || "",
@@ -67,11 +67,11 @@ export function visionRoute(model, baseUrls = {}) {
       kind: "anthropic",
     };
   }
-  // MSP models (e.g. aifarm-msp/Qwen-38-27B) are served from their own base URL
+  // MSP models (e.g. llmgw-msp/Qwen-27B) are served from their own base URL
   // declared in the opencode config — e.g.
-  // …/api/providers/example/msp/qwen3.8-27b/v1 — with the usual chat/completions
+  // …/api/providers/example/msp/qwen-27b/v1 — with the usual chat/completions
   // path. Without the map there is no correct endpoint, so treat as unroutable.
-  if (provider === "aifarm-msp") {
+  if (provider === "llmgw-msp") {
     const base = baseUrls && baseUrls[m] ? String(baseUrls[m]).replace(/\/+$/, "") : "";
     if (!base) return null;
     return {
@@ -134,8 +134,8 @@ export async function transcribeImage({
   try {
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${route.token}` };
     // The farm routes Claude calls on a sticky session instance (same hint the
-    // bundled aifarm-anthropic provider sends).
-    if (route.kind === "anthropic") headers["x-bmf-sticky-session-instance"] = "01";
+    // bundled llmgw-anthropic provider sends).
+    if (route.kind === "anthropic") headers["x-sticky-session-instance"] = "01";
     const res = await fetch(route.url, {
       method: "POST",
       headers,

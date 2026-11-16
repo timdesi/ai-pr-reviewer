@@ -83,7 +83,7 @@ function decodeBody(body) {
 
 function build(options = {}) {
   const base = process.env.ANTHROPIC_VERTEX_BASE_URL;
-  const sticky = process.env.ANTHROPIC_BMF_STICKY ?? "01";
+  const sticky = process.env.STICKY_SESSION_INSTANCE ?? "01";
   const inner = options.fetch;
 
   const cachingFetch = async (url, init) => {
@@ -112,12 +112,12 @@ function build(options = {}) {
     // Skip real GCP OAuth entirely — inject the static farm bearer token instead.
     generateAuthToken: async () => process.env.ANTHROPIC_AUTH_TOKEN,
     headers: async () => ({
-      "x-bmf-sticky-session-instance": sticky,
+      "x-sticky-session-instance": sticky,
     }),
   });
 }
 
-export const aifarmAnthropic = build();
-export const createAifarmAnthropic = build;
+export const llmgwAnthropic = build();
+export const createLlmgwAnthropic = build;
 export const createGoogleVertexAnthropic_ = build;
 export default build;
