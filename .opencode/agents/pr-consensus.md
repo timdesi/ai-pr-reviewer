@@ -174,15 +174,19 @@ finding's confidence at 0.3 — quote real code, never paraphrase it.
   check, downgrade it to MEDIUM and lower confidence — never keep a
   merge-blocking claim you cannot substantiate.
 
-# Acceptance-criteria verdicts (when the input has linked Jira tickets)
+# Acceptance-criteria verdicts (required when the input has Jira tickets)
 
-When the input contains a `## Linked Jira tickets` section whose tickets carry
-**Acceptance criteria**, emit an `acceptance_criteria` array with **one entry
-per AC bullet** — every listed bullet, never a subset. Use the bullet's own id
-**verbatim** as `id`: copy the leading token exactly as it appears in the
-input (e.g. `AC1`, `AC2`, `AC3`). Do not invent sub-ids (`AC3.1`), renumber,
-or paraphrase — the pipeline matches your id to the bullet's label. Judge
-each AC **against this diff**. Exactly these statuses:
+When the input contains a `## Linked Jira tickets` section, you **must** emit an
+`acceptance_criteria` array. The acceptances criteria for each ticket live in
+the full ticket description (blockquoted text under each ticket heading) or in
+a labelled "Acceptance criteria (parsed):" section. Read the description, find
+the criteria yourself — they may use any heading format ("Acceptance Criteria",
+"Definition of Done", "Test Cases", "h2. Criteria", plain bullet list) and any
+markup. Emit **one entry per distinct acceptance criterion** you find, even if
+no explicit heading is present. Use the `id` you see in the text (e.g. `AC1`,
+`"AC 1"`, `"1."`), or if no explicit id exists, assign one (`"AC 1"`, `"AC 2"`)
+and use the `short` field to state what the criterion requires. Judge each AC
+**against this diff**. Exactly these statuses:
 
 - `met` — this change demonstrably satisfies the AC.
 - `partial` — this change advances but does not fully satisfy the AC.
@@ -334,8 +338,10 @@ point:
 
 1. **Keys** — exactly the schema keys, all quoted, no typos, no surrounding
    spaces: `"findings"`, not `" findings"` / `"Findings"` / `"findings "`.
-   `acceptance_criteria` is optional — include it only when the input had
-   acceptance criteria (otherwise emit `[]`).
+   `acceptance_criteria` is **required** when the input lists Jira tickets
+   (the `## Linked Jira tickets` section). Every ticket linked in the PR
+   must have an entry; use `"not_verifiable"` for criteria not verifiable
+   in this diff. When no Jira tickets are linked at all, emit `[]`.
 2. **Strings** — no raw newlines, tabs, or control characters inside string
    values; write them as `\n`. Escape every inner quote as `\"`. Never put
    literal `{}` in prose next to the JSON — your final message contains only the
@@ -353,9 +359,11 @@ point:
 6. **Audience.** The `summary` (and `strengths`/`resolved_previous`) are public:
    never write "Reviewer A/B/C/D", per-agent attribution, or pipeline jargon
    there. Plain author-facing language only; that detail belongs in `notes`.
-7. **AC completeness.** If the input listed acceptance criteria, the
-   `acceptance_criteria` array must contain **one entry per AC bullet** with
-   the bullet's own id verbatim (`AC1`, `AC2`, …) and a `status` + `reason`
-   for each. `[]` is correct only when the input had no acceptance criteria.
+7. **AC completeness (REQUIRED).** When the input has a `## Linked Jira
+   tickets` section, the `acceptance_criteria` array is **required**. Read
+   the description text and extract every criterion you can find — no matter
+   the heading format. `[]` is correct **only** when no Jira tickets are
+   linked at all. Even when you cannot judge a criterion from this diff,
+   emit it with `"not_verifiable"` and a `reason`.
 
 Only when all seven checks pass, output the JSON.

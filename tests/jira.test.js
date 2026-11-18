@@ -46,7 +46,7 @@ test("renderJiraContext renders a ticket block, AC bullets, and error entries", 
   assert.match(block, /When the automatic backlog trigger fires/);
   assert.match(block, /### ACV2-642 — \*could not be fetched \(HTTP 404\)\*/);
   // AC bullets + the stronger "unmet / not verifiable" instruction.
-  assert.match(block, /\*\*Acceptance criteria:\*\*/);
+  assert.match(block, /\*\*Acceptance criteria \(parsed\):\*\*/);
   assert.match(block, /  - AC1: create the lot automatically/);
   assert.match(block, /  - AC2: keep the lot in backlog/);
   assert.match(block, /do NOT call an AC/);
@@ -579,4 +579,58 @@ test("AC parsing drops bare links and pasted payload fragments (live ACME-42667 
   ]);
   assert.equal((withVerdicts.match(/^\| AC\d/gm) || []).length, 2);
   assert.doesNotMatch(withVerdicts, /EventType|docupedia|\| — \| — \|/);
+});
+
+test("fetchJiraTickets retries once when the first response is not valid JSON (HTML SSO page)", async () => {
+  const issueCalls = [];
+  const server = http.createServer((req, res) => {
+    if (req.url.includes("/rest/api/2/field")) {
+      // Field-discovery probe: return an empty list (no custom AC fields).
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("[]");
+      return;
+    }
+    issueCalls.push(req.url);
+    if (issueCalls.length === 1) {
+      // First attempt: SSO/proxy returns an HTML login page instead of JSON.
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<!DOCTYPE html><html><head><title>Sign in</title></head></html>");
+    } else {
+      // Retry: real JSON response.
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          key: "ACME-42897",
+          fields: { summary: "Prepare BE for Revision Level", status: { name: "Open" } },
+        }),
+      );
+    }
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl: `http://127.0.0.1:${port}/tracker01`, token: "T", keys: ["ACME-42897"] });
+    assert.equal(issueCalls.length, 2, "should have retried exactly once");
+    assert.equal(t.key, "ACME-42897");
+    assert.equal(t.error, undefined);
+    assert.equal(t.summary, "Prepare BE for Revision Level");
+  } finally {
+    server.close();
+  }
+});
+
+test("fetchJiraTickets reports an error when JSON parsing fails on both attempts", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<!DOCTYPE html><html><body>SSO wall</body></html>");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl: `http://127.0.0.1:${port}/tracker01`, token: "T", keys: ["ACME-42898"] });
+    assert.ok(t.error, "expected an error entry after both attempts failed");
+    assert.match(t.error, /Unexpected token/i);
+  } finally {
+    server.close();
+  }
 });
