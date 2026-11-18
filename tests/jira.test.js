@@ -634,3 +634,177 @@ test("fetchJiraTickets reports an error when JSON parsing fails on both attempts
     server.close();
   }
 });
+
+test("a Definition of Done heading before the real AC section does not steal the criteria", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        key: "ACME-42",
+        fields: {
+          summary: "DoD first",
+          description:
+            "## Definition of Done\n" +
+            " - code reviewed, tests green, changelog updated\n\n" +
+            "## Acceptance Criteria:\n" +
+            "**AC1 - real criterion**\n" +
+            "**AC2 - another real criterion**\n",
+        },
+      }),
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/tracker01`;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl, token: "T", keys: ["ACME-42"] });
+    assert.match(t.acceptanceCriteria, /AC1 - real criterion/);
+    assert.match(t.acceptanceCriteria, /AC2 - another real criterion/);
+    // The DoD checklist must NOT be treated as acceptance criteria.
+    assert.doesNotMatch(t.acceptanceCriteria, /code reviewed|changelog|tests green/);
+  } finally {
+    server.close();
+  }
+});
+
+test("a Definition of Done heading after the real AC section terminates it", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        key: "ACME-42",
+        fields: {
+          summary: "DoD after",
+          description:
+            "## Acceptance Criteria:\n" +
+            "**AC1 - real criterion**\n\n" +
+            "## Definition of Done\n" +
+            " - generic DoD checklist item that must not become a criterion\n",
+        },
+      }),
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/tracker01`;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl, token: "T", keys: ["ACME-42"] });
+    assert.match(t.acceptanceCriteria, /AC1 - real criterion/);
+    assert.doesNotMatch(t.acceptanceCriteria, /generic DoD checklist/);
+  } finally {
+    server.close();
+  }
+});
+
+test("Definition of Done / Test Cases are a fallback only with a real heading marker", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        key: "ACME-42",
+        fields: {
+          summary: "Fallback",
+          description:
+            "## Test Cases\n" +
+            " - T1: verify the toggle is off by default\n" +
+            " - T2: verify the toggle persists",
+        },
+      }),
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/tracker01`;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl, token: "T", keys: ["ACME-42"] });
+    assert.match(t.acceptanceCriteria, /T1: verify the toggle is off by default/);
+
+    // A bare prose line "Definition of done ..." with no heading marker must
+    // NOT be treated as an AC section at all.
+    const server2 = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          key: "ACME-43",
+          fields: {
+            summary: "Prose",
+            description: "Definition of done by the team before Friday.",
+          },
+        }),
+      );
+    });
+    await new Promise((r) => server2.listen(0, "127.0.0.1", r));
+    try {
+      const [p] = await fetchJiraTickets({
+        baseUrl: `http://127.0.0.1:${server2.address().port}/tracker01`,
+        token: "T",
+        keys: ["ACME-43"],
+      });
+      assert.equal(p.acceptanceCriteria, "");
+    } finally {
+      server2.close();
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("stripJiraMarkup removes a truncated {color:#hex macro without a closing brace", () => {
+  // Example: a stored description truncated at a fixed byte cap can end with
+  // "{color:#172b4d" (no closing brace). It must not leak into the text.
+  const dirty = "{color:#172b4d}*AC1*{color} done{color:#172b4d";
+  const cleaned = dirty
+    .replace(/\{color[^}]*\}/g, "")
+    .replace(/\{color(?::[^\s}]*)?(?=\s|$)/gi, "");
+  assert.equal(cleaned, "*AC1* done");
+  assert.doesNotMatch(cleaned, /\{color/);
+});
+
+test("fetchJiraTickets retries once on a transient HTTP 500 response", async () => {
+  const issueCalls = [];
+  const server = http.createServer((req, res) => {
+    if (req.url.includes("/rest/api/2/field")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("[]");
+      return;
+    }
+    issueCalls.push(req.url);
+    if (issueCalls.length === 1) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ errorMessages: ["boom"] }));
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ key: "ACME-42897", fields: { summary: "OK now" } }));
+    }
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl: `http://127.0.0.1:${port}/tracker01`, token: "T", keys: ["ACME-42897"] });
+    assert.equal(issueCalls.length, 2, "should have retried exactly once on HTTP 500");
+    assert.equal(t.error, undefined);
+    assert.equal(t.summary, "OK now");
+  } finally {
+    server.close();
+  }
+});
+
+test("fetchJiraTickets does NOT retry on HTTP 404 (permanent)", async () => {
+  const issueCalls = [];
+  const server = http.createServer((req, res) => {
+    if (req.url.includes("/rest/api/2/field")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("[]");
+      return;
+    }
+    issueCalls.push(req.url);
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ errorMessages: ["does not exist"] }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const [t] = await fetchJiraTickets({ baseUrl: `http://127.0.0.1:${port}/tracker01`, token: "T", keys: ["ACME-999"] });
+    assert.equal(issueCalls.length, 1, "404 is permanent — no retry");
+    assert.match(t.error, /HTTP 404/);
+  } finally {
+    server.close();
+  }
+});

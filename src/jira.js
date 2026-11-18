@@ -90,8 +90,10 @@ function stripJiraMarkup(s) {
   return String(s || "")
     // Remove full {color:...} macros and bare {color} closers.
     .replace(/\{color[^}]*\}/g, "")
-    // Remove stray {color without a closing brace (Jira sometimes truncates).
-    .replace(/\{color(?:\s|$)/gi, "")
+    // Remove stray/truncated {color without a closing brace (Jira sometimes
+    // truncates a macro at the end of the stored description): both the bare
+    // "{color" and "{color:#hexval" at end-of-line or before whitespace.
+    .replace(/\{color(?::[^\s}]*)?(?=\s|$)/gi, "")
     .replace(/\{panel(?::[^}]*)?\}|\{panel\}/g, "\n\n")
     .replace(/\{code(?::[^}]*)?\}|\{code\}/g, "`…`")
     .replace(/\{quote\}|\{noformat\}/g, "")
@@ -146,20 +148,26 @@ function acItems(s) {
 // "h2. Acceptance Criteria" (classic wiki markup, also German variants) OR a
 // Markdown heading "## Acceptance Criteria" (modern Jira editors render the
 // description this way). The heading prefix is optional — a bare
-// "Acceptance Criteria:" line must match too. Also catches common real-world
-// variants: "Definition of Done" (occasionally teams embed ACs under that
-// heading), "Test Cases" (occasionally teams embed ACs under that heading).
+// "Acceptance Criteria:" line must match too.
 const AC_HEAD_RE =
-  /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)?(?:Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien|Definition of Done|Test Cases?)\s*:?/i;
+  /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)?(?:Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien)\s*:?/i;
+// Fallback: teams occasionally embed ACs under "Definition of Done" or
+// "Test Cases". These only win when no explicit AC heading exists, and they
+// REQUIRE a real heading marker (`## ` / `h2. `) so a stray prose line such as
+// "Definition of done by the team" is never mistaken for an AC section.
+const AC_FALLBACK_HEAD_RE =
+  /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)(?:Definition of Done|Test Cases?)\s*:?/i;
 // Stop at the next section heading (Markdown `#..` or wiki `h..`) that is not
-// the AC heading itself.
+// the AC heading itself. DoD/Test-Cases headings are NOT excluded here: once a
+// real AC section is matched, a following "Definition of Done" heading ends it
+// (its checklist items are not acceptance criteria).
 const AC_STOP_RE =
-  /\n[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)(?!Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien|Definition of Done|Test Cases?)/i;
+  /\n[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)(?!Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien)/i;
 
 /** Text of the "Acceptance Criteria" section inside a Jira description. */
 function acSection(description) {
   const desc = String(description || "");
-  const m = desc.match(AC_HEAD_RE);
+  const m = desc.match(AC_HEAD_RE) || desc.match(AC_FALLBACK_HEAD_RE);
   if (!m) return "";
   const start = m.index + m[0].length;
   const rest = desc.slice(start);
@@ -207,9 +215,11 @@ function extractAcceptanceCriteria(fields, acIds) {
 }
 
 /**
- * Fetch a single issue from the Jira REST API, with one retry on JSON parse
- * failure. JSON parse failures (e.g. HTML response from an SSO-gateway/proxy
- * redirect) are often transient — a retry gets the real JSON response.
+ * Fetch a single issue from the Jira REST API, with one retry on transient
+ * failures. Transient failures are JSON parse errors (e.g. an HTML response
+ * from an SSO-gateway/proxy redirect) and HTTP 429 / 5xx statuses — these are
+ * often momentary, and a retry gets the real JSON response. Permanent errors
+ * (HTTP 404, 403, ...) are returned immediately and never retried.
  */
 async function fetchIssue({ baseUrl, token, key, fields, acIds }) {
   const url = `${baseUrl}/rest/api/2/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(fields)}`;
@@ -218,7 +228,11 @@ async function fetchIssue({ baseUrl, token, key, fields, acIds }) {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       });
-      if (!res.ok) return { key, error: `HTTP ${res.status}` };
+      if (!res.ok) {
+        const transient = res.status === 429 || res.status >= 500;
+        if (transient && attempt < 1) throw new Error(`HTTP ${res.status} (transient)`);
+        return { key, error: `HTTP ${res.status}` };
+      }
       const data = await res.json();
       const f = data.fields || {};
       return {
@@ -238,6 +252,7 @@ async function fetchIssue({ baseUrl, token, key, fields, acIds }) {
     } catch (err) {
       if (attempt < 1) {
         log.info(`Jira fetch ${key} attempt ${attempt + 1} failed; retrying: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 300)); // small backoff before retry
         continue;
       }
       return { key, error: err.message };
