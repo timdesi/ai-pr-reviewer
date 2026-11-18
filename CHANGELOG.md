@@ -10,6 +10,32 @@ below the `v0.2.x` entries.
 
 ---
 
+## v0.5.1 — 2026-11-18 — Jira acceptance criteria no longer lost
+
+- **Reliable Jira ticket fetching.** The SSO/proxy in front of Jira
+  intermittently answers `200 OK` with an HTML login page where the REST API
+  should return JSON; there was no retry, so on the first transient hiccup the
+  ticket was reported as *"could not be fetched"* and its acceptance criteria
+  were never available. Tickets are now fetched in **parallel**, and each
+  fetch retries once on JSON-parse failure and on transient HTTP `429`/`5xx`
+  (with a short backoff). Permanent errors (`404`, `403`) still fail fast.
+- **Consensus now emits acceptance-criteria verdicts.** The consensus prompt
+  treated `acceptance_criteria` as optional and tied to a specific heading
+  format, so the model sometimes returned `[]` even with criteria visible in
+  the raw description. It is now **required** when tickets are linked: the
+  model reads each raw description, extracts every criterion it can find
+  regardless of heading format, and applies `met`/`partial`/`unmet`/
+  `not_verifiable` (with a reason) to each.
+- **Parsing hardening.** Truncated `{color` markup (no closing brace, from
+  capped descriptions) is stripped; *Definition of Done* / *Test Cases*
+  headings are honoured as an AC fallback only with a real heading marker and
+  only when no explicit *Acceptance Criteria* heading exists — a DoD heading no
+  longer hides or swallows the real acceptance-criteria section.
+- **Tests:** +6 (retry on HTML, retry on HTTP 500, no retry on 404, DoD
+  before/after an AC section, heading-marked fallback only, truncated
+  `{color}`); suite 313 green. Verified live: a previously *"could not be
+  fetched"* ticket now renders 4 AC verdicts in a *Jira coverage* table.
+
 ## v0.5.0 — 2026-11-15 — GitHub backend (parallel platform support)
 
 - **GitHub is now a first-class, *parallel* backend** alongside Bitbucket Data
