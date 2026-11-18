@@ -88,8 +88,12 @@ function commentsBlock(comment) {
 /** Strip Jira wiki markup from a single line/fragment. */
 function stripJiraMarkup(s) {
   return String(s || "")
-    .replace(/\{color:[^}]*\}/g, "")
-    .replace(/\{color\}/g, "")
+    // Remove full {color:...} macros and bare {color} closers.
+    .replace(/\{color[^}]*\}/g, "")
+    // Remove stray/truncated {color without a closing brace (Jira sometimes
+    // truncates a macro at the end of the stored description): both the bare
+    // "{color" and "{color:#hexval" at end-of-line or before whitespace.
+    .replace(/\{color(?::[^\s}]*)?(?=\s|$)/gi, "")
     .replace(/\{panel(?::[^}]*)?\}|\{panel\}/g, "\n\n")
     .replace(/\{code(?::[^}]*)?\}|\{code\}/g, "`…`")
     .replace(/\{quote\}|\{noformat\}/g, "")
@@ -131,7 +135,7 @@ function acItems(s) {
       .split(/\r?\n/)
       .map(stripJiraMarkup)
       .filter(Boolean)
-      .filter((ln) => !/^(?:acceptance criteria|akzeptanzkriterien|abnahmekriterien)[.\s]*$/i.test(ln));
+      .filter((ln) => !/^(?:acceptance criteria|akzeptanzkriterien|abnahmekriterien|definition of done|test cases?)[.\s]*$/i.test(ln));
     if (!lines.length || isNoiseBlock(lines)) continue;
     const key = lines.join("\n");
     if (seen.has(key)) continue;
@@ -147,15 +151,23 @@ function acItems(s) {
 // "Acceptance Criteria:" line must match too.
 const AC_HEAD_RE =
   /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)?(?:Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien)\s*:?/i;
+// Fallback: teams occasionally embed ACs under "Definition of Done" or
+// "Test Cases". These only win when no explicit AC heading exists, and they
+// REQUIRE a real heading marker (`## ` / `h2. `) so a stray prose line such as
+// "Definition of done by the team" is never mistaken for an AC section.
+const AC_FALLBACK_HEAD_RE =
+  /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)(?:Definition of Done|Test Cases?)\s*:?/i;
 // Stop at the next section heading (Markdown `#..` or wiki `h..`) that is not
-// the AC heading itself.
+// the AC heading itself. DoD/Test-Cases headings are NOT excluded here: once a
+// real AC section is matched, a following "Definition of Done" heading ends it
+// (its checklist items are not acceptance criteria).
 const AC_STOP_RE =
   /\n[ \t]*(?:#{1,6}[ \t]+|h[1-6]?[.:][ \t]*)(?!Acceptance Criteria|Akzeptanzkriterien|Abnahmekriterien)/i;
 
 /** Text of the "Acceptance Criteria" section inside a Jira description. */
 function acSection(description) {
   const desc = String(description || "");
-  const m = desc.match(AC_HEAD_RE);
+  const m = desc.match(AC_HEAD_RE) || desc.match(AC_FALLBACK_HEAD_RE);
   if (!m) return "";
   const start = m.index + m[0].length;
   const rest = desc.slice(start);
@@ -203,34 +215,29 @@ function extractAcceptanceCriteria(fields, acIds) {
 }
 
 /**
- * Fetch up to `maxTickets` issues. Each entry is either a ticket summary or
- * `{ key, error }`. Never throws for a single bad ticket (that becomes an
- * error entry).
+ * Fetch a single issue from the Jira REST API, with one retry on transient
+ * failures. Transient failures are JSON parse errors (e.g. an HTML response
+ * from an SSO-gateway/proxy redirect) and HTTP 429 / 5xx statuses — these are
+ * often momentary, and a retry gets the real JSON response. Permanent errors
+ * (HTTP 404, 403, ...) are returned immediately and never retried.
  */
-export async function fetchJiraTickets({ baseUrl, token, keys, maxTickets = 5 }) {
-  const base = (baseUrl || "").replace(/\/+$/, "");
-  const picked = (keys || []).slice(0, Math.max(1, maxTickets || 1));
-  const out = [];
-  const acIds = await discoverAcFields({ baseUrl: base, token });
-  const fields = encodeURIComponent(
-    "summary,status,priority,issuetype,labels,assignee,reporter,description,comment" +
-      (acIds.length ? "," + acIds.join(",") : ""),
-  );
-  for (const key of picked) {
+async function fetchIssue({ baseUrl, token, key, fields, acIds }) {
+  const url = `${baseUrl}/rest/api/2/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(fields)}`;
+  for (let attempt = 0; attempt <= 1; attempt++) {
     try {
-      const url = `${base}/rest/api/2/issue/${encodeURIComponent(key)}?fields=${fields}`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       });
       if (!res.ok) {
-        out.push({ key, error: `HTTP ${res.status}` });
-        continue;
+        const transient = res.status === 429 || res.status >= 500;
+        if (transient && attempt < 1) throw new Error(`HTTP ${res.status} (transient)`);
+        return { key, error: `HTTP ${res.status}` };
       }
       const data = await res.json();
       const f = data.fields || {};
-      out.push({
+      return {
         key,
-        url: `${base}/browse/${key}`,
+        url: `${baseUrl}/browse/${key}`,
         summary: f.summary || "",
         type: f.issuetype?.name || "",
         status: f.status?.name || "",
@@ -241,15 +248,44 @@ export async function fetchJiraTickets({ baseUrl, token, keys, maxTickets = 5 })
         description: cap(f.description, DESC_CAP),
         comments: commentsBlock(f.comment),
         acceptanceCriteria: extractAcceptanceCriteria(f, acIds),
-      });
+      };
     } catch (err) {
-      out.push({ key, error: err.message });
+      if (attempt < 1) {
+        log.info(`Jira fetch ${key} attempt ${attempt + 1} failed; retrying: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 300)); // small backoff before retry
+        continue;
+      }
+      return { key, error: err.message };
     }
   }
-  return out;
 }
 
-/** Render `## Linked Jira tickets` markdown block; "" when nothing to render. */
+/**
+ * Fetch up to `maxTickets` issues. Each entry is either a ticket summary or
+ * `{ key, error }`. Never throws for a single bad ticket (that becomes an
+ * error entry).
+ */
+export async function fetchJiraTickets({ baseUrl, token, keys, maxTickets = 5 }) {
+  const base = (baseUrl || "").replace(/\/+$/, "");
+  const picked = (keys || []).slice(0, Math.max(1, maxTickets || 1));
+  const acIds = await discoverAcFields({ baseUrl: base, token });
+  const fields = [
+    "summary", "status", "priority", "issuetype", "labels",
+    "assignee", "reporter", "description", "comment",
+    ...acIds,
+  ].join(",");
+  const results = await Promise.allSettled(
+    picked.map((key) => fetchIssue({ baseUrl: base, token, key, fields, acIds })),
+  );
+  return results.map((r) => (r.status === "fulfilled" ? r.value : { key: "?", error: r.reason?.message || "unknown" }));
+}
+
+/**
+ * Render `## Linked Jira tickets` markdown block.
+ *
+ * Shows the mechanically-extracted AC bullets (from the "Acceptance Criteria"
+ * section heading) AND the raw full description, so the AI can cross-reference.
+ */
 export function renderJiraContext(tickets) {
   if (!Array.isArray(tickets) || !tickets.length) return "";
   const lines = [];
@@ -266,14 +302,18 @@ export function renderJiraContext(tickets) {
     if (t.reporter) extras.push(`Reporter: ${t.reporter}`);
     if (t.labels && t.labels.length) extras.push(`Labels: ${t.labels.join(", ")}`);
     if (extras.length) lines.push(`- ${extras.join("  ")}`);
+    // Mechanical AC bullets (from heading-based extraction).
     const acs = acItems(t.acceptanceCriteria);
     if (acs.length) {
-      lines.push("- **Acceptance criteria:**");
+      lines.push("- **Acceptance criteria (parsed):**");
       for (const item of acs) {
         lines.push(`  - ${item[0]}`);
         for (const sub of item.slice(1)) lines.push(`    - ${sub}`);
       }
     }
+    // Full raw description — the AI reads the real intent, not just what the
+    // parser found. This makes the review resilient to headings the parser
+    // does not recognise and to ACs embedded in plain text / tables.
     if (t.description) lines.push(`\n${quote(t.description)}`);
     if (t.comments) lines.push(`\n${t.comments}`);
   }
@@ -327,32 +367,20 @@ function verdictForAc(item, verdicts) {
       (head === id || head.startsWith(`${id}:`) || head.startsWith(`${id} `) || head.startsWith(`${id}-`))
     );
   };
-  // Preferred: an exact bullet-id match. This is what sub-numbered bullets
-  // need — "AC3.1 - …" must bind to verdict "AC3.1", never to its parent
-  // "AC3" (list order must not decide).
   const exact = verdicts.find(idMatches);
   if (exact) return exact;
-  // Fallback for ids the model invents without the bullet's own label
-  // ("AC 3", "3", "ac3"): bind to a verdict whose leading ordinal equals the
-  // bullet's. Sub-numbered verdict ids ("AC3.1") are excluded here so they are
-  // never collapsed onto a parent "AC3" row — they keep their exact binding.
   const headInt = acMarkerInt(head);
   if (headInt == null) return null;
   return (
     verdicts.find((v) => {
       const idText = String(v?.id || "").toLowerCase().trim();
-      if (!idText || /\.\d/.test(String(v?.id))) return false; // keep sub-ids exact
+      if (!idText || /\.\d/.test(String(v?.id))) return false;
       const idInt = acMarkerInt(idText);
       return idInt != null && idInt === headInt;
     }) || null
   );
 }
 
-/**
- * One-line description of what an AC requires, for compact views. Prefers the
- * consensus `short` label; otherwise falls back to the AC bullet heading with a
- * leading "ACx:" id-prefix stripped (the id is shown separately in the UI).
- */
 function acShort(id, headBody, verdictShort) {
   if (typeof verdictShort === "string" && verdictShort.trim()) return verdictShort.trim().slice(0, 160);
   let s = headBody || "";
@@ -393,7 +421,6 @@ export function buildAcView(tickets, verdicts = []) {
       counts[v.status] = (counts[v.status] || 0) + 1;
       matched++;
       const head = item[0] || "";
-      // Don't echo the id when the bullet's own heading line is just the id.
       const headLine = head.toLowerCase() === String(v.id).toLowerCase() ? "" : head;
       return {
         id: String(v.id),
@@ -434,8 +461,6 @@ export function renderJiraAppendix(tickets, verdicts = []) {
     const title = `${card.key}${card.summary ? ` — ${card.summary}` : ""}`;
     lines.push(card.url ? `**[${title}](${card.url})**` : `**${title}**`);
     if (card.items.length) {
-      // With verdicts, show only judged rows (same as the UI); stray AC-section
-      // text (links, notes, pasted payloads) is context, not a criterion.
       const rows = card.counts ? card.items.filter((it) => it.id) : card.items;
       lines.push("", "| Acceptance criterion | Status | Notes |", "|---|---|---|");
       for (const it of rows) {
