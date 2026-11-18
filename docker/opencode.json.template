@@ -88,7 +88,7 @@
         "glm-52": {
           "name": "GLM-5 (LLM Gateway MSP)",
           "capabilities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1048576, "output": 131072 },
+          "limit": { "context": 262144, "output": 131072 },
           "cost": {
             "input": 0.418,
             "output": 1.338,

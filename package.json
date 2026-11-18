@@ -1,6 +1,6 @@
 {
   "name": "ai-pr-reviewer",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "On-demand AI pull-request reviewer for Bitbucket Data Center and GitHub",
   "type": "module",

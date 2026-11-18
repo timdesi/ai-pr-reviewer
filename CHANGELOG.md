@@ -10,6 +10,28 @@ below the `v0.2.x` entries.
 
 ---
 
+## v0.5.2 — 2026-11-18 — GLM-52 context declared truthfully (large-diff robustness)
+
+- **Corrected model context declaration in the container template.**
+  `glm-52` was declared with a **1,048,576**-token context while the model
+  provider actually enforces **262,144**. The review tool budgets the prompt
+  against the declared limit, so on large PRs it sent prompts far over the
+  real window and every reviewer failed instantly with an input-overflow /
+  compaction error (reported by the provider as `maximum context length is
+  262144`). The declared limit is now **262,144**, matching provider truth, so
+  oversized inputs are rejected up front instead of mis-budgeted.
+- **Large PRs now degrade gracefully, not fail.** The existing diff-budget
+  guard (`MAX_DIFF_BYTES`, default `300_000`) truncates an over-sized diff to
+  a representative slice — whole source files first, then tests, then
+  lockfiles/generated files — and tells the reviewer (via an inline NOTE) to
+  read the truncated files from the checkout. Previously a very large PR (a
+  few MB diff) could exceed even the largest declared model window and abort
+  the review. Recommended operator guidance: keep `MAX_DIFF_BYTES` within the
+  smallest reviewer's effective input budget (~250–400 KB for the current
+  model set).
+
+---
+
 ## v0.5.1 — 2026-11-18 — Jira acceptance criteria no longer lost
 
 - **Reliable Jira ticket fetching.** The SSO/proxy in front of Jira
