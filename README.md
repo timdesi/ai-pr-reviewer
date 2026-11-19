@@ -1,46 +1,60 @@
 <div align="center">
 
-# 🔍 AI PR Reviewer
+# AI PR Reviewer
 
-**A second pair of eyes on every pull request — in minutes, not days.**
+A second pair of eyes on every pull request — in minutes, not days.
 
-Comment `/ai-review` on a pull request and get back one clear, evidence-backed
-review: what's good, what's worth fixing, and why.
+Comment `/ai-review` on a pull request and get back one clear,
+evidence-backed review: what's good, what's worth fixing, and why.
 
-Works with **Bitbucket Data Center** and **GitHub** · Node.js ≥ 22 · Powered by [OpenCode](https://opencode.ai)
+Works with **Bitbucket Data Center** and **GitHub** · Node.js ≥ 22 ·
+Powered by [OpenCode](https://opencode.ai)
 
 </div>
 
 ---
 
-## Why you might want this
+## Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Example review](#example-review)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [How it works](#how-it-works)
+- [Safety & trust](#safety--trust)
+- [Deployment](#deployment)
+- [Development](#development)
+- [Project layout](#project-layout)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Overview
 
 Code review is the best quality gate we have — and also the biggest queue.
 AI PR Reviewer doesn't replace your teammates; it gives them a head start.
 
-- 🧠 **Four specialists, one verdict.** Independent AI reviewers each look at the
-  change through a different lens, then a consensus step merges their findings
-  into a single, de-duplicated comment.
-- 🧾 **Evidence, not vibes.** Every finding points at real changed lines and
-  quotes the code. Findings that can't be grounded are flagged as unverified.
-- 🤝 **Advisory and read-only.** It never approves, merges, declines, or edits
-  your code. Exactly **one comment per review**.
-- 💶 **Cheap and quick.** Typically ~3 minutes and a few cents per review.
+It is **advisory and read-only**: one comment per review, never an approval,
+merge, decline, or code change.
 
-## What it does
+## Features
 
-| | |
+| Capability | Description |
 |---|---|
-| **Parallel specialist reviewers** | **A** correctness & logic · **B** data, persistence & compatibility · **C** security, Jira requirements & tests · **D** language, i18n & translation quality (joins automatically on translation PRs) |
-| **Consensus agent** | Weighs each finding, drops duplicates and noise, re-checks the evidence, and writes the final comment |
-| **Jira awareness** | Fetches linked tickets and judges the change against the ticket's **acceptance criteria**, with a per-criterion verdict |
-| **Screenshot reading** | Images pasted into the PR are transcribed by a vision model, so UI changes get reviewed too |
-| **Smart re-reviews** | Findings already explained in the PR discussion are marked resolved instead of re-raised |
-| **Real checkout** | Reviewers run against the actual commit plus your curated project context and the repo's own `AGENTS.md` — not just a diff |
-| **Dashboard** | Live per-agent progress, cost per review, history grouped by pull request, and a model switcher |
-| **Two platforms, side by side** | Bitbucket Data Center and GitHub are independent backends on the same server; each PR picks its own |
+| Parallel specialist reviewers | **A** correctness & logic · **B** data, persistence & compatibility · **C** security, Jira requirements & tests · **D** language, i18n & translation quality (joins automatically on translation PRs) |
+| Consensus agent | Weighs each finding, drops duplicates and noise, re-checks the evidence, and writes the final comment |
+| Jira awareness | Fetches linked tickets and judges the change against the ticket's acceptance criteria, with a per-criterion verdict |
+| Screenshot reading | Images pasted into the PR are transcribed by a vision model, so UI changes get reviewed too |
+| Smart re-reviews | Findings already explained in the PR discussion are marked resolved instead of re-raised |
+| Real checkout | Reviewers run against the actual commit plus your curated project context and the repo's own `AGENTS.md` — not just a diff |
+| Dashboard | Live per-agent progress, cost per review, history grouped by pull request, and a model switcher |
+| Two platforms | Bitbucket Data Center and GitHub are independent backends on the same server; each PR picks its own |
 
-## What a review looks like
+## Example review
 
 ```md
 ## AI Review - 3f8d1c4
@@ -64,7 +78,7 @@ distinct flag via the specification builder, and the new query is covered.
 1. Apply filters before offset/limit in the specification.
 ```
 
-**Reading the verdict**
+Verdicts map to the app's status colors:
 
 | Verdict | Meaning |
 |---|---|
@@ -76,12 +90,10 @@ distinct flag via the specification builder, and the new query is covered.
 Findings below the configured severity/confidence gate are collapsed into a
 compact **Minor** list and don't drive the verdict.
 
----
-
 ## Quick start
 
 You need **Node.js ≥ 22** and the [`opencode`](https://opencode.ai) CLI, with
-access to at least one model provider (see [Models](#models)).
+access to at least one model provider (see [Configuration](#configuration)).
 
 ```bash
 git clone <this-repo> && cd ai-pr-reviewer
@@ -89,16 +101,16 @@ npm install
 cp .env.example .env        # then fill in your Bitbucket and/or GitHub credentials
 ```
 
-**Review a pull request** (safe by default — it only writes a draft locally):
+Review a pull request — safe by default, it only writes a draft locally:
 
 ```bash
-npm run review -- ACME/acme-app#5566                                    # Bitbucket
-npm run review -- gh:acme/widgets#42                                    # GitHub
-npm run review -- https://github.com/acme/widgets/pull/42               # GitHub URL
-npm run review -- ACME/acme-app#5566 --publish --yes                    # actually post it
+npm run review -- ACME/acme-app#5566                     # Bitbucket
+npm run review -- gh:acme/widgets#42                     # GitHub
+npm run review -- https://github.com/acme/widgets/pull/42 # GitHub URL
+npm run review -- ACME/acme-app#5566 --publish --yes     # actually post it
 ```
 
-**Open the dashboard** to watch it run and browse past reviews:
+Open the dashboard to watch it run and browse past reviews:
 
 ```bash
 npm run ui                  # → http://127.0.0.1:8123
@@ -108,13 +120,11 @@ npm run ui                  # → http://127.0.0.1:8123
 > `github:owner/repo#N`, or a GitHub `/pull/N` URL means GitHub.
 > CLI options: `--publish` · `--yes` · `--json` · `--quiet` · `--help`.
 
-Each run leaves its artifacts in its own folder under `jobs/` — the full internal report
-(`final-report.md`), the public comment draft (`comment-draft.md`), and every
-reviewer's raw output.
+Each run leaves its artifacts in its own folder under `jobs/` — the full
+internal report (`final-report.md`), the public comment draft
+(`comment-draft.md`), and every reviewer's raw output.
 
----
-
-## Run it for your team
+## Usage
 
 Let people trigger reviews without touching a terminal:
 
@@ -130,17 +140,15 @@ Let people trigger reviews without touching a terminal:
 
 | Trigger | How |
 |---|---|
-| 💬 **Comment** | Write `/ai-review` on the PR (`--force` re-reviews an unchanged head) |
-| 👤 **Add the reviewer** | Add the AI reviewer account as a PR reviewer |
-| 🚀 **Open / ready** | Open a PR, or mark a draft ready, with the AI reviewer attached |
+| Comment | Write `/ai-review` on the PR (`--force` re-reviews an unchanged head) |
+| Add the reviewer | Add the AI reviewer account as a PR reviewer |
+| Open / ready | Open a PR, or mark a draft ready, with the AI reviewer attached |
 
 Branch pairs such as `develop ↔ release/*` can be skipped
 (`REVIEW_ON_REVIEWER_ADDED_SKIP`), and auto-review can be turned off per
 repository. Full details in the
 [usage guide](docs/ai-pr-reviewer-usage-guide.md); a one-page version lives in
 the [cheat sheet](docs/ai-pr-reviewer-cheatsheet.md).
-
----
 
 ## Configuration
 
@@ -159,8 +167,8 @@ The ones you'll touch first:
 | `REVIEW_CONTEXT_DIR` · `FETCH_REPO_CONTEXT` | Per-repo curated context and `AGENTS.md` |
 | `REVIEWER_PARALLELISM` | `0` = all reviewers in parallel, `1` = one at a time (small hosts) |
 
-> 💡 A Bitbucket-only or GitHub-only instance simply fills in one block and
-> leaves the other empty.
+> A Bitbucket-only or GitHub-only instance simply fills in one block and leaves
+> the other empty.
 
 ### Models
 
@@ -178,43 +186,85 @@ your own, or point the IDs at providers you already have configured.
 - The consensus model reads roughly 60 KB of reviewer reports, so pick one that
   handles long context well.
 
----
-
 ## How it works
 
+Every review runs through the same pipeline, whether it was triggered from the
+CLI, the dashboard, or a webhook:
+
+```text
+                    ┌─────────────────────────────┐
+   PR opened ──────▶│ 1. Fetch PR                 │
+                    │    metadata · diff · files  │
+                    └──────────────┬──────────────┘
+                                   ▼
+                    ┌─────────────────────────────┐
+                    │ 2. Build context            │
+                    │    diff · project · Jira ·  │
+                    │    screenshots (vision)     │
+                    └──────────────┬──────────────┘
+                                   ▼
+        ┌──────────────┬───────────┴───────────┬──────────────┐
+        ▼              ▼                       ▼              ╎
+ ┌────────────┐ ┌────────────┐         ┌────────────┐        ╎ translation
+ │ 3a. A      │ │ 3b. B      │         │ 3c. C      │         ╎ PRs only
+ │ correctness│ │ data &     │         │ security · │         ╎
+ │ & logic    │ │ compat     │         │ Jira · tests│        ▼
+ └──────┬─────┘ └──────┬─────┘         └──────┬─────┘  ┌────────────┐
+        │              │                      │        │ 3d. D      │
+        │              │                      │        │ language / │
+        │              │                      │        │ i18n       │
+        │              │                      │        └──────┬─────┘
+        └──────────────┴──────────┬───────────┴───────────────┘
+                                   ▼
+                    ┌─────────────────────────────┐
+                    │ 4. Consensus                │
+                    │    weigh · dedupe · verify  │
+                    └──────────────┬──────────────┘
+                                   ▼
+                    ┌─────────────────────────────┐
+                    │ 5. Publish one comment      │
+                    │    (or local draft)         │
+                    └─────────────────────────────┘
 ```
- PR + diff ─▶ build context ─┬─▶ Reviewer A ─┐
-              • diff          ├─▶ Reviewer B ─┼─▶ Consensus ─▶ evidence ─▶ one PR
-              • project ctx   ├─▶ Reviewer C ─┘   (weigh,       check        comment
-              • Jira ticket   └─▶ Reviewer D        dedupe,
-              • screenshots       (translation PRs   verify)
-                                   only)
-```
+
+1. **Fetch the PR** — metadata, the diff, and the list of changed files.
+2. **Build the context** — the diff, per-repo project context (and the repo's own
+   `AGENTS.md`), the linked Jira ticket, and any screenshots transcribed by the
+   vision model.
+3. **Run the reviewers in parallel** — A (correctness), B (data & compatibility),
+   C (security, Jira, tests), and D (language/i18n, only on translation PRs).
+4. **Reach consensus** — the consensus agent weighs each finding, drops
+   duplicates and noise, re-checks the quoted evidence, and caps low-confidence
+   claims.
+5. **Publish one comment** — the final, de-duplicated review is posted to the PR
+   (or written as a local draft in dry-run mode).
+
+Design principles that shape each stage:
 
 - **Lenses, not clones.** Each reviewer has its own specialist prompt
   (`prompts/lens-*.md`, compiled into `.opencode/agents/`), so they catch
   different things rather than repeating each other.
-- **Filter, don't accumulate.** The consensus step keeps only distinct,
-  relevant findings, re-checks quoted evidence, and caps low-confidence claims.
 - **Grounded by design.** A finding must reference lines that actually changed,
   otherwise it's marked unverified.
-- **Fully configurable models.** Per slot, per repository, switchable live
-  from the dashboard.
+- **Filter, don't accumulate.** Only distinct, relevant findings reach the final
+  comment; low-confidence claims are collapsed into a compact **Minor** list.
+- **Resilient.** If a single reviewer fails, the others still run and consensus
+  proceeds (at least two reviewers must succeed).
+- **Fully configurable models.** Every slot is configurable per repository and
+  switchable live from the dashboard.
 
 Deeper dive: [architecture & design decisions](docs/ai-bitbucket-pr-reviewer-architecture.md).
 
 ## Safety & trust
 
-- 🔒 **Read-only.** One advisory comment per review — never approves, merges,
+- **Read-only.** One advisory comment per review — never approves, merges,
   declines, or modifies code.
-- 🧑‍🤝‍🧑 **Allowlist.** `ALLOWED_REVIEWER_USERS` controls who can trigger reviews.
-- ✍️ **Signed webhooks.** Bitbucket and GitHub deliveries are HMAC-verified.
-  The GitHub endpoint is **disabled** (fails closed) until a secret is set.
-- 🕒 **No stale comments.** A review is published only if the head commit
-  hasn't moved since the review started.
-- 🧪 **Safe by default.** Publishing is off until you turn it on.
-
----
+- **Allowlist.** `ALLOWED_REVIEWER_USERS` controls who can trigger reviews.
+- **Signed webhooks.** Bitbucket and GitHub deliveries are HMAC-verified. The
+  GitHub endpoint is disabled (fails closed) until a secret is set.
+- **No stale comments.** A review is published only if the head commit hasn't
+  moved since the review started.
+- **Safe by default.** Publishing is off until you turn it on.
 
 ## Deployment
 
@@ -262,12 +312,12 @@ tests/      unit and integration tests
 
 ## Documentation
 
-| | |
+| Resource | Description |
 |---|---|
-| 📘 [Usage guide](docs/ai-pr-reviewer-usage-guide.md) | The full operator guide |
-| 📄 [Cheat sheet](docs/ai-pr-reviewer-cheatsheet.md) | One page: triggers, verdicts, config, troubleshooting |
-| 🏗️ [Architecture](docs/ai-bitbucket-pr-reviewer-architecture.md) | Design and decisions |
-| 📝 [Changelog](CHANGELOG.md) | Release history |
+| [Usage guide](docs/ai-pr-reviewer-usage-guide.md) | The full operator guide |
+| [Cheat sheet](docs/ai-pr-reviewer-cheatsheet.md) | One page: triggers, verdicts, config, troubleshooting |
+| [Architecture](docs/ai-bitbucket-pr-reviewer-architecture.md) | Design and decisions |
+| [Changelog](CHANGELOG.md) | Release history |
 
 ## Contributing
 
@@ -277,10 +327,6 @@ Ideas, bug reports, and pull requests are very welcome. Before you open one:
 2. Keep reviewer behaviour changes in `prompts/` and run `npm run build:agents`.
 3. Enable the `pre-push` hook (above) so no internal strings slip through.
 
----
-
-<div align="center">
+## License
 
 Released under the [MIT License](LICENSE).
-
-</div>
