@@ -6,12 +6,12 @@
 //   - a `status.json` file written into the job dir after every meaningful
 //     state change (so jobs started by the CLI can be inspected afterwards).
 
-import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync, rmSync } from "node:fs";
 import path from "node:path";
 
 import { createReviewClient, botUsernamesOf, prCommentUrl, reportBaseUrl } from "./clients.js";
 import { buildReviewerContext, buildConsensusContext, loadProjectContext } from "./context.js";
-import { prepareCheckout, cleanupCheckout } from "./checkout.js";
+import { prepareCheckout, cleanupCheckout, maintainCheckout } from "./checkout.js";
 import { runAgent } from "./opencode.js";
 import { extractTrailingJson } from "./extractJson.js";
 import { validateReviewerReport, validateConsensusReport, repairReportKeys } from "./validate.js";
@@ -176,7 +176,37 @@ export async function runReview({ ref, config, options = {} }) {
   const reviewedSha = from.latestCommit || from.id;
   const jobName = `${jobPrefixFor(ref)}${reviewedSha?.slice(0, 8)}`;
   const jobDir = path.join(jobsDir, jobName);
-  mkdirSync(jobDir, { recursive: true });
+  // ENOSPC guard (issue #11): if the shared PVC is full, reclaim the checkout
+  // workspace (gc + LRU eviction) and retry; if that still leaves no room —
+  // workspace freed nothing (REVIEW_CHECKOUT=0 / all repos protected) OR freed
+  // a little but not enough for this job dir — also drop the oldest *finished*
+  // review job dirs (the PVC holds /app/data/jobs too), then retry once more
+  // before failing cleanly. Each reclaim is best-effort: a reclaim failure is
+  // logged and the next strategy still runs, so the original ENOSPC is never
+  // masked by a raw secondary error (PR #12 AI review MEDIUM + minor).
+  const mkJobDir = () => mkdirSync(jobDir, { recursive: true });
+  try {
+    mkJobDir();
+  } catch (err) {
+    if (err.code !== "ENOSPC") throw err;
+    log.warn(`job dir ENOSPC (${err.message}); reclaiming checkout workspace and retrying`);
+    try {
+      await maintainCheckout(config).catch((re) => log.warn(`workspace reclaim failed: ${re.message}`));
+      mkJobDir();
+    } catch (err2) {
+      if (err2.code !== "ENOSPC") throw err2;
+      log.warn(`still ENOSPC (${err2.message}); reclaiming old job dirs and retrying`);
+      await reclaimOldJobDirs(config, { skipDir: jobDir });
+      try {
+        mkJobDir();
+      } catch (err3) {
+        if (err3.code === "ENOSPC") {
+          throw new Error(`no disk space for review job after reclaim (ENOSPC): ${err3.message}`);
+        }
+        throw err3;
+      }
+    }
+  }
 
   status.job = jobName;
   status.title = pullRequest.title;
@@ -329,46 +359,55 @@ export async function runReview({ ref, config, options = {} }) {
     };
   }
 
-  // 2b. (optional) Shallow git checkout of the reviewed commit, so reviewers
-  // can read real files beyond the diff. Best-effort: any failure degrades to
-  // "no checkout" and the review proceeds on diff + context alone.
-  let agentCwd = null;
-  const checkout = await prepareCheckout({
-    config,
-    ref,
-    sha: reviewedSha,
-    branch: (pullRequest.fromRef || {}).displayId || null,
-  });
-  if (checkout.ok) {
-    agentCwd = checkout.dir;
-    status.paths.checkout = checkout.dir;
-    log.info(`Review checkout: ${checkout.dir} (@${String(reviewedSha).slice(0, 12)})`);
-  } else {
-    // Never let agents browse the reviewer app itself (source, .env) as "the repo".
-    agentCwd = path.join(jobDir, "sandbox");
-    mkdirSync(agentCwd, { recursive: true });
-  }
-
-  // 3. Reviewer context.
-  let contextText = buildReviewerContext({
-    ref,
-    pullRequest,
-    changes,
-    diff,
-    maxDiffBytes: config.git.maxDiffBytes,
-    projectContext,
-    discussionBlock,
-    prImagesBlock,
-  });
-  // 3b. (optional) Linked Jira tickets — additive + non-fatal (see src/jira.js).
-  const jira = await loadJiraContext({ config, pullRequest });
-  if (jira.block) contextText += "\n\n---\n\n" + jira.block;
-  const contextFile = path.join(jobDir, "pr-context.md");
-  writeFileSync(contextFile, contextText);
+  // 2b–3b live inside the try below: cleanupCheckout in the finally must cover
+  // everything from the successful prepareCheckout onward, so a throw between
+  // checkout and the review body (context build, Jira lookup, context write)
+  // can never leak the active-checkout protection (AI review, PR #12 MEDIUM).
 
   // 4. Run the active reviewers in parallel (with bounded retries). A/B/C run
   // on every review; reviewer D joins when the PR is a translation/content PR.
+  // `checkout` is hoisted so the finally can pass its protection token back to
+  // cleanupCheckout — it must never be released for a review whose checkout
+  // failed (that would unprotect a concurrent review on the same repo).
+  let checkout = null;
   try {
+    // 2b. (optional) Shallow git checkout of the reviewed commit, so reviewers
+    // can read real files beyond the diff. Best-effort: any failure degrades to
+    // "no checkout" and the review proceeds on diff + context alone.
+    let agentCwd = null;
+    checkout = await prepareCheckout({
+      config,
+      ref,
+      sha: reviewedSha,
+      branch: (pullRequest.fromRef || {}).displayId || null,
+    });
+    if (checkout.ok) {
+      agentCwd = checkout.dir;
+      status.paths.checkout = checkout.dir;
+      log.info(`Review checkout: ${checkout.dir} (@${String(reviewedSha).slice(0, 12)})`);
+    } else {
+      // Never let agents browse the reviewer app itself (source, .env) as "the repo".
+      agentCwd = path.join(jobDir, "sandbox");
+      mkdirSync(agentCwd, { recursive: true });
+    }
+
+    // 3. Reviewer context.
+    let contextText = buildReviewerContext({
+      ref,
+      pullRequest,
+      changes,
+      diff,
+      maxDiffBytes: config.git.maxDiffBytes,
+      projectContext,
+      discussionBlock,
+      prImagesBlock,
+    });
+    // 3b. (optional) Linked Jira tickets — additive + non-fatal (see src/jira.js).
+    const jira = await loadJiraContext({ config, pullRequest });
+    if (jira.block) contextText += "\n\n---\n\n" + jira.block;
+    const contextFile = path.join(jobDir, "pr-context.md");
+    writeFileSync(contextFile, contextText);
+
     onStage("review");
     fire("stage", { stage: "review" });
     const reviewerOutcomes = await runReviewers({
@@ -522,7 +561,9 @@ export async function runReview({ ref, config, options = {} }) {
     fire("error", { message: err.message });
     throw err;
   } finally {
-    await cleanupCheckout({ config, ref });
+    // `token` is the bare dir only when this review actually got a checkout —
+    // cleanupCheckout releases protection exclusively through it.
+    await cleanupCheckout({ config, ref, token: checkout?.ok ? checkout.bare : null });
   }
 }
 
@@ -854,6 +895,57 @@ export function finalizeStaleJobs(config) {
     }
   }
   return finalized;
+}
+
+// A finished review job dir must be at least this old before the ENOSPC reclaim
+// may delete it — conservative, so a job that just started (or whose metadata is
+// still being written) can never be mistaken for garbage.
+const JOB_RECLAIM_MIN_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Emergency job-dir reclaim for the ENOSPC path (issue #11 / PR #12 AI review):
+ * when the checkout-workspace reclaim freed nothing (REVIEW_CHECKOUT=0, or every
+ * repo is protected/in-use), drop the oldest *finished* review job dirs — the
+ * PVC also holds /app/data/jobs. Conservative: a dir is touched only when its
+ * status.json is NOT a running stage AND its job-meta.json startedAt is at least
+ * an hour old (a missing/undeterminable start is left alone). Returns the number
+ * of job dirs removed.
+ */
+export function reclaimOldJobDirs(config, { skipDir = null } = {}) {
+  const jobsDir = config.dirs.jobs;
+  if (!existsSync(jobsDir)) return 0;
+  let entries = [];
+  try {
+    entries = readdirSync(jobsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .filter((name) => !name.startsWith("."));
+  } catch {
+    return 0;
+  }
+  const now = Date.now();
+  const candidates = [];
+  for (const name of entries) {
+    const dir = path.join(jobsDir, name);
+    if (skipDir && path.resolve(dir) === path.resolve(skipDir)) continue;
+    const status = readFileJson(path.join(dir, "status.json")) || {};
+    if (RUNNING_STAGES.has(status.stage)) continue; // in-flight — never touch
+    const started = new Date(readFileJson(path.join(dir, "job-meta.json"))?.startedAt || 0).getTime();
+    if (!started || started <= 0 || now - started < JOB_RECLAIM_MIN_AGE_MS) continue;
+    candidates.push({ dir, started });
+  }
+  candidates.sort((a, b) => a.started - b.started); // oldest first
+  let removed = 0;
+  for (const c of candidates) {
+    try {
+      rmSync(c.dir, { recursive: true, force: true });
+      removed += 1;
+      log.warn(`jobs: ENOSPC reclaim removed finished job ${path.basename(c.dir)} (started ${new Date(c.started).toISOString()})`);
+    } catch (err) {
+      log.warn(`jobs: ENOSPC reclaim failed for ${path.basename(c.dir)}: ${err.message}`);
+    }
+  }
+  return removed;
 }
 
 function statTime(jobsDir, name) {
