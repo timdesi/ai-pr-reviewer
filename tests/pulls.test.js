@@ -178,6 +178,96 @@ test("live head is cached within TTL and cleared by clearPullCache()", async () 
   assert.equal(client.calls.head.length, 2, "clearPullCache forces refetch");
 });
 
+test("concurrent listPulls share one in-flight Bitbucket fetch per PR (coalescing)", async () => {
+  clearPullCache();
+  const cfg = freshCfg();
+  const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5620 };
+  makeJobDir(cfg.dirs.jobs, "ACME-acme-app-PR5620-aaa11111", {
+    ref,
+    reviewedSha: "aaa11111",
+    startedAt: "2026-10-20T09:00:00.000Z",
+    title: "PR #5620",
+  });
+  // Slow the client so BOTH callers are in flight simultaneously — exactly the
+  // "multiple tabs hit /api/pulls at the same moment" case from issue #9.
+  const client = fakeClient({
+    heads: { "ACME/acme-app#5620": "zzz99999" },
+    prCommits: { "ACME/acme-app#5620": ["zzz99999", "aaa11111"] },
+  });
+  const slowClient = {
+    ...client,
+    async getPullRequestRefs(ref) {
+      await new Promise((r) => setTimeout(r, 50));
+      return client.getPullRequestRefs(ref);
+    },
+  };
+
+  const [a, b] = await Promise.all([
+    listPulls(cfg, { client: slowClient, live: true, ttlMs: 600_000 }),
+    listPulls(cfg, { client: slowClient, live: true, ttlMs: 600_000 }),
+  ]);
+  assert.equal(client.calls.head.length, 1, "same PR fetched once despite two concurrent callers");
+  assert.equal(client.calls.commits.length, 1);
+  assert.equal(a.pulls[0].headSha, "zzz99999");
+  assert.equal(b.pulls[0].headSha, "zzz99999");
+  assert.equal(a.pulls[0].stale, true);
+  assert.equal(b.pulls[0].stale, true);
+});
+
+test("clearPullCache() mid-flight does not lose coalescing for newer callers", async () => {
+  clearPullCache();
+  const cfg = freshCfg();
+  const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5630 };
+  makeJobDir(cfg.dirs.jobs, "ACME-acme-app-PR5630-aaa11111", {
+    ref,
+    reviewedSha: "aaa11111",
+    startedAt: "2026-10-20T09:00:00.000Z",
+    title: "PR #5630",
+  });
+  // A hand-controlled client: head lookups hang until we release them, so the
+  // exact interleaving (fetch in flight + cache cleared + new callers) from the
+  // AI review is reproducible instead of timing-dependent.
+  let releaseHeads = null;
+  const headGate = new Promise((r) => (releaseHeads = r));
+  const client = {
+    calls: { head: 0, commits: 0 },
+    async getPullRequestRefs() {
+      this.calls.head++;
+      await headGate;
+      return { headSha: "zzz99999", branch: "f", targetBranch: "master", author: null, state: "OPEN", closed: false };
+    },
+    async getPullRequestCommits() {
+      this.calls.commits++;
+      return [{ id: "zzz99999", message: "x", author: "a@example.com", timestamp: 1700000000000 }];
+    },
+  };
+  const settle = () => new Promise((r) => setImmediate(r));
+
+  // Caller 1 starts a fetch and stays in flight.
+  const pA = listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  await settle();
+  assert.equal(client.calls.head, 1);
+
+  // A review completes on the server → cache + inflight cleared while A is
+  // still in flight (server.js clears on complete/error).
+  clearPullCache();
+
+  // Newer callers must coalesce onto a shared fresh fetch, and the stale first
+  // settle must NOT evict that entry (the re-opened duplicate window from #10).
+  const pB = listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  await settle();
+  const pC = listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  await settle();
+  assert.equal(client.calls.head, 2, "one fresh fetch after the clear; third caller shares it");
+
+  releaseHeads();
+  const [a, b, c] = await Promise.all([pA, pB, pC]);
+  assert.equal(client.calls.head, 2, "no extra head fetch despite the stale settle");
+  assert.equal(a.pulls[0].headSha, "zzz99999");
+  assert.equal(b.pulls[0].headSha, "zzz99999");
+  assert.equal(c.pulls[0].headSha, "zzz99999");
+});
+
 test("head lookups that fail do not break the pull list; up-to-date PRs are not stale", async () => {
   clearPullCache();
   const cfg = freshCfg();

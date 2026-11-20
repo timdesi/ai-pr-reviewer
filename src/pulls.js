@@ -10,6 +10,12 @@
 //
 // The Bitbucket head/commits fetches are cached in-memory (HEAD_TTL_MS) so the
 // UI can poll cheaply; pass live=0 (or omit the client) to get local-only data.
+//
+// Rate care (issue #9): several /api/pulls callers (tab(s), SSE events) can hit
+// the endpoint at once, and the 60s TTL means a full re-fetch ~every minute. To
+// avoid a burst of duplicate Bitbucket requests that trips 429 rate limits, the
+// cache ALSO dedupes in-flight fetches: concurrent lookups of the same PR share
+// one promise instead of each starting its own GET.
 
 import { listJobs } from "./pipeline.js";
 import { log } from "./log.js";
@@ -20,9 +26,12 @@ const HEAD_TTL_MS = 60_000;
 
 // ref-key -> { ts, res: { headSha, stale, newCommits } }
 const headCache = new Map();
+// ref-key -> pending enrichment promise for that PR (in-flight coalescing).
+const inflight = new Map();
 
 export function clearPullCache() {
   headCache.clear();
+  inflight.clear();
 }
 
 export function keyOf(ref) {
@@ -174,6 +183,44 @@ async function enrichOne(pull, client, { ttlMs }) {
     applyHead(pull, cached.res);
     return;
   }
+
+  // In-flight coalescing: another /api/pulls caller (or worker) may already be
+  // fetching this same PR. Share its promise instead of issuing a duplicate
+  // Bitbucket request — repeated 429s came from identical same-second fetches.
+  const pending = inflight.get(pull.key);
+  if (pending) {
+    const res = await pending; // never rejects (stored with .catch → null)
+    if (res) applyHead(pull, res);
+    return;
+  }
+
+  // Do the fetch + cache write inside a single promise so every waiter gets the
+  // same result. The result (including a failed/429 lookup) stays cached for
+  // TTL, so a rate-limited batch is not re-fetched by every poller.
+  const fetching = fetchHeadState(client, pull).then((res) => {
+    headCache.set(pull.key, { ts: Date.now(), res });
+    applyHead(pull, res);
+    return res;
+  });
+  // Waiters share the promise but must never see a rejection (fetchHeadState
+  // catches internally; this guards against unexpected programmer errors).
+  const guarded = fetching.catch(() => null);
+  inflight.set(pull.key, guarded);
+  try {
+    await fetching;
+  } catch (err) {
+    log.warn(`pulls: unexpected enrichment failure for ${pull.key}: ${err?.message || err}`);
+  } finally {
+    // A review completion can clearPullCache() while this fetch is still in
+    // flight; a newer caller may then have installed a fresh entry for the same
+    // PR. Delete the entry only if it is still ours, so a stale settle cannot
+    // evict a newer in-flight promise (and reopen the duplicate-request window).
+    if (inflight.get(pull.key) === guarded) inflight.delete(pull.key);
+  }
+}
+
+/** Fetch live head state for one PR and return the `res` object (see applyHead). */
+async function fetchHeadState(client, pull) {
   let headSha = null;
   let branch = null;
   let targetBranch = null;
@@ -208,9 +255,7 @@ async function enrichOne(pull, client, { ttlMs }) {
       log.warn(`pulls: new-commits lookup failed for ${pull.key}: ${err.message}`);
     }
   }
-  const res = { headSha, stale, newCommits, historyRewritten, headError, branch, targetBranch, author, state, closed, notFound };
-  headCache.set(pull.key, { ts: Date.now(), res });
-  applyHead(pull, res);
+  return { headSha, stale, newCommits, historyRewritten, headError, branch, targetBranch, author, state, closed, notFound };
 }
 
 /** Fetch live head state for every pull concurrently (bounded). */
