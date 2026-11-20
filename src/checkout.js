@@ -21,16 +21,65 @@
 
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 import { log } from "./log.js";
 import { backendConfig } from "./clients.js";
 
-function git(args) {
-  return spawnSync("git", args, {
-    encoding: "utf8",
-    timeout: 300000,
-    maxBuffer: 16 * 1024 * 1024,
+// Default git call timeout (ms) and max captured stdout bytes. Matches the old
+// spawnSync(300s) behaviour, but now the child runs on its own process while the
+// event loop keeps serving /healthz — a stalled fetch can no longer freeze the
+// HTTP server (see issue #6).
+const GIT_TIMEOUT_MS = 300000;
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
+ * Run git asynchronously (non-blocking). Resolves with the same result shape as
+ * the previous spawnSync helper so callers/throwIf keep behaving identically:
+ * `{ status, stdout, stderr, error }`. On timeout the whole process group is
+ * SIGKILLed and `error` is set so throwIf still surfaces the failure.
+ */
+function git(args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    const out = { status: null, stdout: "", stderr: "", error: null, timedOut: false };
+    let settled = false;
+    const child = spawn("git", args, {
+      detached: true, // own process group so timeout can kill fetch subprocesses too
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(out);
+    };
+    const timer = setTimeout(() => {
+      out.timedOut = true;
+      out.error = new Error(`git timed out after ${timeoutMs}ms`);
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }, timeoutMs);
+    child.stdout.on("data", (d) => {
+      if (Buffer.byteLength(out.stdout, "utf8") < GIT_MAX_BUFFER) out.stdout += d.toString();
+    });
+    child.stderr.on("data", (d) => {
+      if (Buffer.byteLength(out.stderr, "utf8") < GIT_MAX_BUFFER) out.stderr += d.toString();
+    });
+    child.on("error", (err) => {
+      out.error = err;
+      finish();
+    });
+    child.on("close", (code) => {
+      out.status = code;
+      finish();
+    });
   });
 }
 
@@ -138,20 +187,26 @@ async function withLock(lock, fn, timeoutMs = 30000) {
 }
 
 /** Ensure the bare cache repo exists, configured for this cluster, and fetch the reviewed SHA. */
-async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin, platform }) {
+async function ensureFetched({ baseUrl, token, username = "x-token-auth", verifyTls, workspaceRoot, ref, sha, branch, origin, platform, lowSpeedLimit, lowSpeedTime }) {
   const bare = bareRepoDir({ workspaceRoot, ref });
   mkdirSync(path.dirname(bare), { recursive: true });
 
   if (!existsSync(path.join(bare, "HEAD"))) {
-    throwIf(git(["init", "--bare", bare]), "git init");
+    throwIf(await git(["init", "--bare", bare]), "git init");
     const url = origin || scmUrl({ baseUrl, projectKey: ref.projectKey, repoSlug: ref.repoSlug, platform });
-    throwIf(git(["--git-dir", bare, "remote", "add", "origin", url]), "git remote add");
-    if (!verifyTls) git(["--git-dir", bare, "config", "http.sslVerify", "false"]);
+    throwIf(await git(["--git-dir", bare, "remote", "add", "origin", url]), "git remote add");
+    if (!verifyTls) await git(["--git-dir", bare, "config", "http.sslVerify", "false"]);
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-    if (proxy) git(["--git-dir", bare, "config", "http.proxy", proxy]);
+    if (proxy) await git(["--git-dir", bare, "config", "http.proxy", proxy]);
   }
 
   const base = ["--git-dir", bare, "fetch", "--no-tags"];
+  // Abort a fetch that has stalled: if the transfer rate stays below
+  // lowSpeedLimit bytes/s for lowSpeedTime s, git gives up instead of hanging on
+  // a dead proxy connection until the 300 s timeout (issue #6).
+  if (lowSpeedLimit != null && lowSpeedTime != null) {
+    base.unshift("-c", `http.lowSpeedLimit=${lowSpeedLimit}`, "-c", `http.lowSpeedTime=${lowSpeedTime}`);
+  }
   const attempts = [];
 
   // Preferred: Bearer via http.extraHeader — the token never appears in a URL.
@@ -176,10 +231,10 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
   // the deeper branch attempts then surface the SHA locally, and we verify it.
   let fetched = false;
   for (const args of attempts) {
-    const r = git(args);
+    const r = await git(args);
     if (r.error) throw r.error;
     if (r.status === 0) {
-      const check = git(["--git-dir", bare, "cat-file", "-e", `${sha}^{commit}`]);
+      const check = await git(["--git-dir", bare, "cat-file", "-e", `${sha}^{commit}`]);
       if (check.status === 0) {
         fetched = true;
         break;
@@ -191,13 +246,13 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
 }
 
 /** Attach (or reuse) a detached worktree at the deterministic SHA dir. */
-function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
+async function ensureWorktree({ workspaceRoot, ref, sha, bare }) {
   const wt = worktreePath({ workspaceRoot, ref, sha });
 
   if (existsSync(path.join(wt, ".git"))) return wt; // already a linked worktree
 
   rmSync(wt, { recursive: true, force: true });
-  throwIf(git(["--git-dir", bare, "worktree", "add", "--detach", wt, sha]), "git worktree add");
+  throwIf(await git(["--git-dir", bare, "worktree", "add", "--detach", wt, sha]), "git worktree add");
   return wt;
 }
 
@@ -206,7 +261,7 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
   const bare = bareRepoDir({ workspaceRoot, ref });
   if (!existsSync(path.join(bare, "HEAD"))) return;
 
-  const list = git(["--git-dir", bare, "worktree", "list", "--porcelain"]);
+  const list = await git(["--git-dir", bare, "worktree", "list", "--porcelain"]);
   const entries = String(list.stdout)
     .split("\n\n")
     // `worktree list` on a *bare* repo also emits the bare repo itself as an
@@ -234,13 +289,13 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
   const valid = entries.filter((e) => e.dir && existsSync(e.dir)).sort((a, b) => b.mtime - a.mtime);
   for (const e of valid.slice(keep)) {
     try {
-      git(["--git-dir", bare, "worktree", "remove", "--force", e.dir]);
+      await git(["--git-dir", bare, "worktree", "remove", "--force", e.dir]);
     } catch {
       rmSync(e.dir, { recursive: true, force: true });
-      git(["--git-dir", bare, "worktree", "prune"]);
+      await git(["--git-dir", bare, "worktree", "prune"]);
     }
   }
-  git(["--git-dir", bare, "worktree", "prune"]);
+  await git(["--git-dir", bare, "worktree", "prune"]);
 }
 
 /**
@@ -279,8 +334,10 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
         branch,
         origin,
         platform: ref?.platform,
+        lowSpeedLimit: config.checkout?.lowSpeedLimit ?? 1024,
+        lowSpeedTime: config.checkout?.lowSpeedTime ?? 30,
       });
-      const wt = ensureWorktree({ workspaceRoot, ref, sha, bare });
+      const wt = await ensureWorktree({ workspaceRoot, ref, sha, bare });
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
       return { ok: true, dir: wt, bare, sha };
     });

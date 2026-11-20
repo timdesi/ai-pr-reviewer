@@ -19,6 +19,7 @@ const state = {
   notices: [],
   pullPage: 1, // left-list pagination (PRs view)
   jobPage: 1, // left-list pagination (Jobs view)
+  jobTotal: 0, // total jobs known to the server (for the list pager)
   stats: null, // latest /api/stats response
   statsGran: "week", // trend-chart granularity: "day" | "week" | "month"
   prevMode: null, // mode to return to when closing the stats page (pulls|jobs)
@@ -142,11 +143,17 @@ function inline(s) {
 
 async function fetchJobs() {
   try {
-    const r = await fetch("/api/jobs");
+    // Server-side pagination keeps the payload small (no huge status blobs) and
+    // keeps the list cheap even with a large job store (issue #6).
+    const offset = (state.jobPage - 1) * PAGE_SIZE;
+    const r = await fetch(`/api/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
     const j = await r.json();
     state.jobs = j.jobs || [];
+    state.jobTotal = typeof j.total === "number" ? j.total : state.jobs.length;
     renderJobList();
-    if (state.selected && !state.jobs.some((x) => x.job === state.selected)) {
+    // Clear the selection only when the store is truly empty — the job list is
+    // now paginated, so an off-page selection stays valid (detail loads by name).
+    if (state.selected && state.jobTotal === 0) {
       state.selected = null;
       showEmptyOrPull();
     }
@@ -198,11 +205,11 @@ function renderJobList() {
   state.running = running;
   $("#backend-state").textContent = running ? "run in progress" : "idle";
   $("#backend-state").className = "pill" + (running ? " live" : "");
-  const total = state.jobs.length;
+  // Server returns one page (PAGE_SIZE) at a time; `jobTotal` is the real count.
+  const total = state.jobTotal || state.jobs.length;
   const page = Math.min(state.jobPage, Math.max(1, Math.ceil(total / PAGE_SIZE)));
   state.jobPage = page;
-  const from = (page - 1) * PAGE_SIZE;
-  for (const job of state.jobs.slice(from, from + PAGE_SIZE)) {
+  for (const job of state.jobs) {
     const li = el("li");
     if (job.job === state.selected) li.classList.add("active");
     li.appendChild(el("span", "job-title", job.title || job.job));
@@ -225,7 +232,7 @@ function renderJobList() {
     total,
     onNav: (pg) => {
       state.jobPage = pg;
-      renderJobList();
+      fetchJobs(); // server-side page: fetch the new offset
     },
   });
 }

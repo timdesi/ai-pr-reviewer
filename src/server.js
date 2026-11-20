@@ -37,7 +37,7 @@ import path from "node:path";
 
 import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
-import { runReview, listJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
+import { runReview, listJobsPage, finalizeStaleJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
 import { listPulls, clearPullCache } from "./pulls.js";
 import { computeStats } from "./stats.js";
 import { parseWebhookRequest, verifySignature, isUnsignedDiagnostic, isForceReview } from "./webhook.js";
@@ -584,7 +584,13 @@ export function createServer({ config, port = config.server.port, host = config.
       }
 
       if (url === "/api/jobs") {
-        return sendJson(res, 200, { jobs: listJobs(config) });
+        // Paginated + slim: reads only `limit` job summaries, no huge payload to
+        // serialize on the single-threaded loop (issue #6). The UI pages with
+        // ?limit&offset; `total` lets it show "of N" without fetching all.
+        const q = new URL(req.url, "http://localhost").searchParams;
+        const limit = Math.max(0, parseInt(q.get("limit") ?? "50", 10) || 50);
+        const offset = Math.max(0, parseInt(q.get("offset") ?? "0", 10) || 0);
+        return sendJson(res, 200, listJobsPage(config, { limit, offset }));
       }
 
       // --- per-PR view ------------------------------------------------------
@@ -725,6 +731,16 @@ export function createServer({ config, port = config.server.port, host = config.
 export async function main() {
   const config = loadConfig();
   await initProxy();
+  // Boot-time sweep (issue #6): this process starts with no reviews in flight,
+  // so any job left in a running stage was orphaned by a previous process's
+  // crash/restart. Mark them failed so the dashboard shows no phantom "running"
+  // jobs and re-reviews aren't blocked.
+  try {
+    const finalized = finalizeStaleJobs(config);
+    if (finalized > 0) log.warn(`startup: finalized ${finalized} stale running job(s) from a previous process`);
+  } catch (err) {
+    log.warn(`startup sweep failed: ${err.message}`);
+  }
   const { server } = createServer({ config });
   server.listen(config.server.port, config.server.host, () => {
     log.info(`AI PR Reviewer UI: http://${config.server.host}:${config.server.port}`);

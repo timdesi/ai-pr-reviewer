@@ -290,6 +290,12 @@ export function loadConfig({ envFile } = {}) {
       enabled: bool("REVIEW_CHECKOUT", false),
       // Newest worktrees kept per repo after each review (PVC capacity guard).
       keep: int("CHECKOUT_KEEP", 3),
+      // Abort a fetch that has stalled on a dead proxy connection instead of
+      // blocking the (now async) git child for the full timeout: if the transfer
+      // rate stays below `lowSpeedLimit` bytes/s for `lowSpeedTime` seconds git
+      // gives up (issue #6).
+      lowSpeedLimit: int("CHECKOUT_LOW_SPEED_LIMIT", 1024),
+      lowSpeedTime: int("CHECKOUT_LOW_SPEED_TIME", 30),
     },
     server: {
       host: str("HOST", "127.0.0.1"),
