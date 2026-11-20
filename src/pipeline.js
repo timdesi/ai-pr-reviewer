@@ -346,46 +346,51 @@ export async function runReview({ ref, config, options = {} }) {
     };
   }
 
-  // 2b. (optional) Shallow git checkout of the reviewed commit, so reviewers
-  // can read real files beyond the diff. Best-effort: any failure degrades to
-  // "no checkout" and the review proceeds on diff + context alone.
-  let agentCwd = null;
-  const checkout = await prepareCheckout({
-    config,
-    ref,
-    sha: reviewedSha,
-    branch: (pullRequest.fromRef || {}).displayId || null,
-  });
-  if (checkout.ok) {
-    agentCwd = checkout.dir;
-    status.paths.checkout = checkout.dir;
-    log.info(`Review checkout: ${checkout.dir} (@${String(reviewedSha).slice(0, 12)})`);
-  } else {
-    // Never let agents browse the reviewer app itself (source, .env) as "the repo".
-    agentCwd = path.join(jobDir, "sandbox");
-    mkdirSync(agentCwd, { recursive: true });
-  }
-
-  // 3. Reviewer context.
-  let contextText = buildReviewerContext({
-    ref,
-    pullRequest,
-    changes,
-    diff,
-    maxDiffBytes: config.git.maxDiffBytes,
-    projectContext,
-    discussionBlock,
-    prImagesBlock,
-  });
-  // 3b. (optional) Linked Jira tickets — additive + non-fatal (see src/jira.js).
-  const jira = await loadJiraContext({ config, pullRequest });
-  if (jira.block) contextText += "\n\n---\n\n" + jira.block;
-  const contextFile = path.join(jobDir, "pr-context.md");
-  writeFileSync(contextFile, contextText);
+  // 2b–3b live inside the try below: cleanupCheckout in the finally must cover
+  // everything from the successful prepareCheckout onward, so a throw between
+  // checkout and the review body (context build, Jira lookup, context write)
+  // can never leak the active-checkout protection (AI review, PR #12 MEDIUM).
 
   // 4. Run the active reviewers in parallel (with bounded retries). A/B/C run
   // on every review; reviewer D joins when the PR is a translation/content PR.
   try {
+    // 2b. (optional) Shallow git checkout of the reviewed commit, so reviewers
+    // can read real files beyond the diff. Best-effort: any failure degrades to
+    // "no checkout" and the review proceeds on diff + context alone.
+    let agentCwd = null;
+    const checkout = await prepareCheckout({
+      config,
+      ref,
+      sha: reviewedSha,
+      branch: (pullRequest.fromRef || {}).displayId || null,
+    });
+    if (checkout.ok) {
+      agentCwd = checkout.dir;
+      status.paths.checkout = checkout.dir;
+      log.info(`Review checkout: ${checkout.dir} (@${String(reviewedSha).slice(0, 12)})`);
+    } else {
+      // Never let agents browse the reviewer app itself (source, .env) as "the repo".
+      agentCwd = path.join(jobDir, "sandbox");
+      mkdirSync(agentCwd, { recursive: true });
+    }
+
+    // 3. Reviewer context.
+    let contextText = buildReviewerContext({
+      ref,
+      pullRequest,
+      changes,
+      diff,
+      maxDiffBytes: config.git.maxDiffBytes,
+      projectContext,
+      discussionBlock,
+      prImagesBlock,
+    });
+    // 3b. (optional) Linked Jira tickets — additive + non-fatal (see src/jira.js).
+    const jira = await loadJiraContext({ config, pullRequest });
+    if (jira.block) contextText += "\n\n---\n\n" + jira.block;
+    const contextFile = path.join(jobDir, "pr-context.md");
+    writeFileSync(contextFile, contextText);
+
     onStage("review");
     fire("stage", { stage: "review" });
     const reviewerOutcomes = await runReviewers({

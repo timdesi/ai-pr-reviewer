@@ -250,3 +250,34 @@ test("active review checkout is protected from eviction until cleanup (PR #12 ME
   assert.ok(freedAfter > 0, "repo becomes evictable after cleanupCheckout");
   assert.ok(!existsSync(res.bare), "bare reclaimed after review done");
 });
+
+test("overlapping reviews on the same repo stay protected until the last one finishes (PR #12 MEDIUM)", async () => {
+  const { remote, sha1, sha2 } = makeRemote();
+  const config = baseConfig();
+  // Two concurrent reviews of the same repo — the lock is per-repo but only
+  // covers the fetch/worktree phase, so both checkouts can be live at once.
+  const r1 = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  const r2 = await prepareCheckout({ config, ref, sha: sha2, branch: "main", origin: remote });
+  assert.equal(r1.ok, true, r1.reason);
+  assert.equal(r2.ok, true, r2.reason);
+  assert.notEqual(r1.dir, r2.dir, "each review gets its own worktree");
+
+  // First review finishes — the shared repo must stay protected for the second.
+  await cleanupCheckout({ config, ref });
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null,
+  });
+  assert.equal(freed, 0, "repo stays protected while the second review runs");
+  assert.ok(existsSync(r2.dir), "second review's worktree intact");
+
+  // Second review finishes — with the last ref released, eviction may reclaim.
+  await cleanupCheckout({ config, ref });
+  const freedAfter = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null,
+  });
+  assert.ok(freedAfter > 0, "repo evictable once the last review finished");
+});

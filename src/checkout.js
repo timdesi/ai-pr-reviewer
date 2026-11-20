@@ -317,12 +317,24 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
 const EVICTION_CHECK_INTERVAL_MS = 60_000;
 let lastEvictionCheckAt = 0;
 
-// Bare repos whose checkout is currently handed to a running review (added when
-// prepareCheckout succeeds, cleared in cleanupCheckout's finally). The per-repo
-// `.lock-*` is only held inside prepareCheckout — the review agents then run
-// against the worktree with no lock, so a reclaim must not evict a repo that is
-// in active use (AI review, PR #12 MEDIUM). Eviction skips every bare in here.
-const activeBares = new Set();
+// Bare repos whose checkout is currently handed to a running review, refcounted
+// per repo: added on successful prepareCheckout, released in cleanupCheckout.
+// Two reviews of the same repo can overlap (the per-repo lock only covers the
+// fetch/worktree phase), so the entry is dropped only when the *last* finisher
+// releases — otherwise the first one to finish would unprotect the repo while
+// the other review still runs against its worktree (AI review, PR #12 MEDIUM).
+// Eviction skips every bare in here.
+const activeBares = new Map();
+
+function protectBare(bare) {
+  activeBares.set(bare, (activeBares.get(bare) ?? 0) + 1);
+}
+
+function releaseBare(bare) {
+  const n = (activeBares.get(bare) ?? 0) - 1;
+  if (n <= 0) activeBares.delete(bare);
+  else activeBares.set(bare, n);
+}
 
 /** Number of `.pack` files in a bare repo's object store (0 when absent). */
 export function packCount(bare) {
@@ -612,8 +624,10 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       }
       // Mark this repo's checkout as in use so a concurrent/emergency eviction
       // never deletes the worktree while the review agents are running against
-      // it (they hold no lock after prepareCheckout returns).
-      activeBares.add(bare);
+      // it (they hold no lock after prepareCheckout returns). Refcounted so
+      // overlapping reviews on the same repo stay protected until the last
+      // finish.
+      protectBare(bare);
       return { ok: true, dir: wt, bare, sha };
     });
   } catch (err) {
@@ -625,7 +639,7 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
 export async function cleanupCheckout({ config, ref }) {
   try {
     if (!config.checkout?.enabled) return;
-    activeBares.delete(bareRepoDir({ workspaceRoot: config.dirs.workspaceRoot, ref }));
+    releaseBare(bareRepoDir({ workspaceRoot: config.dirs.workspaceRoot, ref }));
     await pruneWorktrees({ workspaceRoot: config.dirs.workspaceRoot, ref, keep: config.checkout.keep });
   } catch (err) {
     log.warn(`checkout cleanup failed: ${err.message}`);
