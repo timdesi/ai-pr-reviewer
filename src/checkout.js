@@ -19,7 +19,7 @@
 // `CHECKOUT_KEEP` newest per repo after each review (git worktree prune), so a
 // large repository cannot fill the 2 GiB volume.
 
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -176,14 +176,43 @@ async function withLock(lock, fn, timeoutMs = 30000) {
       // A real failure (parent dir missing, EACCES, …) must surface immediately
       // instead of being misread as a held lock and spinning until timeout.
       if (err.code !== "EEXIST") throw err;
-      if (Date.now() > deadline) throw new Error("checkout lock timed out");
-      await new Promise((r) => setTimeout(r, 250));
+      if (lockHeld(lock)) {
+        if (Date.now() > deadline) throw new Error("checkout lock timed out");
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      // else: the lock was stale and lockHeld just reaped it → retry mkdir now.
     }
   }
   try {
     return await fn();
   } finally {
     rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+// A checkout lock older than this must be a crash leftover — each git op under
+// the lock is capped at GIT_TIMEOUT_MS (5 min), so 30 min is a safe margin even
+// for a pathological sequence of ops. Reaping it prevents a stale `.lock-*` from
+// blocking eviction or new checkouts forever after a pod/process crash (PR #12
+// AI review minor).
+const LOCK_STALE_MS = 30 * 60 * 1000;
+
+/**
+ * Is the lock dir genuinely held? Reaps locks that are stale (crash leftovers)
+ * and returns whether one is still held. Never throws. Used by withLock,
+ * evictWorkspace and the reclaim gc loop so a stale lock can't wedge a repo.
+ */
+function lockHeld(lock) {
+  try {
+    const st = statSync(lock);
+    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+      log.warn(`checkout: reaped stale lock ${path.basename(lock)} (mtime ${new Date(st.mtimeMs).toISOString()})`);
+      rmSync(lock, { recursive: true, force: true });
+      return false;
+    }
+    return true;
+  } catch {
+    return false; // absent or unreadable → not held
   }
 }
 
@@ -243,6 +272,16 @@ async function ensureFetched({ baseUrl, token, username = "x-token-auth", verify
     }
   }
   if (!fetched) throw new Error(`could not fetch reviewed sha ${sha}`);
+  // Record use time on the bare dir itself: fetching writes into objects/ packs,
+  // which does not reliably bump the dir's own mtime, and LRU eviction orders by
+  // that mtime — without an explicit touch the first-seen repo would be treated
+  // as the least-recently-used forever (PR #12 AI review minor).
+  try {
+    const now = new Date();
+    utimesSync(bare, now, now);
+  } catch {
+    /* best-effort */
+  }
   return bare;
 }
 
@@ -504,10 +543,11 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
       if (r.dir === keepBare) return false;
       if (activeBares.has(r.dir)) return false; // worktree in use by a running review
       // A held checkout lock means another review is mid-checkout on this repo —
-      // never evict an object store that is actively being fetched into (AI
-      // review, PR #12 minor).
+      // never evict an object store that is actively being fetched into. A stale
+      // (crash-leftover) lock is reaped by lockHeld and does not block eviction
+      // (AI review, PR #12 minor).
       const handle = r.name.slice(0, -".git".length);
-      return !existsSync(path.join(workspaceRoot, `.lock-${handle}`));
+      return !lockHeld(path.join(workspaceRoot, `.lock-${handle}`));
     })
     // Attach mtime outside the sort so a dir that vanishes between readdir and
     // stat (concurrent remove/eviction) can't throw out of the whole reclaim
@@ -536,7 +576,12 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
     try {
       mkdirSync(lockPath);
     } catch {
-      continue; // lock held → a review is mid-checkout on this repo
+      if (lockHeld(lockPath)) continue; // genuinely held → a review is mid-checkout
+      try {
+        mkdirSync(lockPath); // stale lock reaped above → retake it
+      } catch {
+        continue;
+      }
     }
     let size = 0;
     try {
@@ -583,7 +628,7 @@ export async function maintainCheckout(config) {
     // repack/prune underneath the review's file reads (AI review, PR #12
     // MEDIUM).
     const handle = e.name.slice(0, -".git".length);
-    if (existsSync(path.join(root, `.lock-${handle}`))) continue;
+    if (lockHeld(path.join(root, `.lock-${handle}`))) continue;
     if (activeBares.has(path.join(root, e.name))) continue;
     try {
       await maintainBare(path.join(root, e.name), { packs: gate });
@@ -643,20 +688,20 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
         lowSpeedTime: config.checkout?.lowSpeedTime ?? 30,
       });
       const wt = await ensureWorktree({ workspaceRoot, ref, sha, bare });
-      await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
-      // Mark the checkout in use *now* — before maintenance — so a concurrent
-      // reclaim can never touch it, and so a maintenance failure below still
-      // leaves a valid, protected checkout instead of being turned into a
-      // "no checkout" (AI review, PR #12 MEDIUM). Refcounted so overlapping
-      // reviews on the same repo stay protected until the last finish.
+      // Mark the checkout in use the moment the worktree exists — before any
+      // cleanup/maintenance — so a concurrent reclaim can never touch it AND so
+      // a prune/maintenance failure can never turn a built checkout into
+      // "no checkout" (same bug class as the round-5 MEDIUM, which only wrapped
+      // maintainBare/evict; pruneWorktrees was still unprotected ahead of it).
       protectBare(bare);
-      // Disk maintenance (issue #11): consolidate this repo's packs before they
-      // accumulate, and evict LRU repos if the workspace grew past its budget.
-      // Best-effort: a maintenance failure (e.g. gc hitting ENOSPC writing its
-      // temp pack) logs and keeps the checkout already built. The LRU eviction's
-      // full-workspace `du` is throttled (once per interval) — the statfs
-      // free-space guard above and the ENOSPC reclaim still react immediately.
+      // Best-effort housekeeping (issue #11): prune worktrees to CHECKOUT_KEEP,
+      // consolidate this repo's packs before they accumulate, and evict LRU
+      // repos if the workspace grew past its budget. The LRU `du` is throttled
+      // (once per interval) — the statfs free-space guard below and the ENOSPC
+      // reclaim still react immediately. A failure only costs housekeeping, never
+      // the checkout already built.
       try {
+        await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
         await maintainBare(bare, { packs: config.checkout.gcPacks ?? 20 });
         const nowEvict = Date.now();
         if (nowEvict - lastEvictionCheckAt >= EVICTION_CHECK_INTERVAL_MS) {

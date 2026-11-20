@@ -177,27 +177,34 @@ export async function runReview({ ref, config, options = {} }) {
   const jobName = `${jobPrefixFor(ref)}${reviewedSha?.slice(0, 8)}`;
   const jobDir = path.join(jobsDir, jobName);
   // ENOSPC guard (issue #11): if the shared PVC is full, reclaim the checkout
-  // workspace (gc + LRU eviction) once and retry before failing cleanly —
-  // instead of dying with a raw "no space left on device". When the workspace
-  // reclaim has nothing to give (e.g. REVIEW_CHECKOUT=0, or every repo is
-  // protected/in-use), also drop the oldest finished review job dirs — the PVC
-  // holds /app/data/jobs too (PR #12 AI review).
+  // workspace (gc + LRU eviction) and retry; if that still leaves no room —
+  // workspace freed nothing (REVIEW_CHECKOUT=0 / all repos protected) OR freed
+  // a little but not enough for this job dir — also drop the oldest *finished*
+  // review job dirs (the PVC holds /app/data/jobs too), then retry once more
+  // before failing cleanly. Each reclaim is best-effort: a reclaim failure is
+  // logged and the next strategy still runs, so the original ENOSPC is never
+  // masked by a raw secondary error (PR #12 AI review MEDIUM + minor).
+  const mkJobDir = () => mkdirSync(jobDir, { recursive: true });
   try {
-    mkdirSync(jobDir, { recursive: true });
+    mkJobDir();
   } catch (err) {
     if (err.code !== "ENOSPC") throw err;
     log.warn(`job dir ENOSPC (${err.message}); reclaiming checkout workspace and retrying`);
-    const reclaimed = await maintainCheckout(config);
-    if (!reclaimed?.freedBytes) {
-      await reclaimOldJobDirs(config, { skipDir: jobDir });
-    }
     try {
-      mkdirSync(jobDir, { recursive: true });
+      await maintainCheckout(config).catch((re) => log.warn(`workspace reclaim failed: ${re.message}`));
+      mkJobDir();
     } catch (err2) {
-      if (err2.code === "ENOSPC") {
-        throw new Error(`no disk space for review job after workspace reclaim (ENOSPC): ${err2.message}`);
+      if (err2.code !== "ENOSPC") throw err2;
+      log.warn(`still ENOSPC (${err2.message}); reclaiming old job dirs and retrying`);
+      await reclaimOldJobDirs(config, { skipDir: jobDir });
+      try {
+        mkJobDir();
+      } catch (err3) {
+        if (err3.code === "ENOSPC") {
+          throw new Error(`no disk space for review job after reclaim (ENOSPC): ${err3.message}`);
+        }
+        throw err3;
       }
-      throw err2;
     }
   }
 

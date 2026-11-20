@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -301,4 +301,27 @@ test("a failed checkout does not release a concurrent review's protection (PR #1
   });
   assert.equal(freed, 0, "failed review must not release the good review's protection");
   assert.ok(existsSync(good.dir), "good review's worktree still intact");
+});
+
+test("a stale (crash-leftover) checkout lock is reaped and does not block eviction (PR #12 minor)", async () => {
+  const { remote, sha1 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+  await cleanupCheckout({ config, ref, token: res.bare }); // review done, protection released
+
+  const lockPath = path.join(config.dirs.workspaceRoot, ".lock-acme-acme-app");
+  mkdirSync(lockPath, { recursive: true });
+  const { utimesSync } = await import("node:fs");
+  const longAgo = new Date(Date.now() - 60 * 60 * 1000);
+  utimesSync(lockPath, longAgo, longAgo);
+
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null,
+  });
+  assert.ok(freed > 0, "repo with only a stale lock is still evictable");
+  assert.ok(!existsSync(lockPath), "stale lock reaped");
+  assert.ok(!existsSync(res.bare), "repo evicted despite the stale lock");
 });
