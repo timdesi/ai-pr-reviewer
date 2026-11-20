@@ -199,8 +199,8 @@ test("eviction removes only the evicted repo's worktree: name-prefix sibling sur
 
   // Simulate both reviews having finished (the real finally calls cleanupCheckout)
   // so neither is in the active-protection set and eviction may reclaim the old one.
-  await cleanupCheckout({ config, ref: refShort });
-  await cleanupCheckout({ config, ref: refLong });
+  await cleanupCheckout({ config, ref: refShort, token: rShort.bare });
+  await cleanupCheckout({ config, ref: refLong, token: rLong.bare });
 
   // Age the short repo so LRU evicts it first; keepBare protects the long one.
   const { utimesSync } = await import("node:fs");
@@ -241,7 +241,7 @@ test("active review checkout is protected from eviction until cleanup (PR #12 ME
   assert.ok(existsSync(res.dir), "active worktree protected while review runs");
 
   // Once the review finishes (finally → cleanupCheckout), eviction may reclaim.
-  await cleanupCheckout({ config, ref });
+  await cleanupCheckout({ config, ref, token: res.bare });
   const freedAfter = await evictWorkspace({
     workspaceRoot: config.dirs.workspaceRoot,
     workspaceMaxBytes: 1,
@@ -263,7 +263,7 @@ test("overlapping reviews on the same repo stay protected until the last one fin
   assert.notEqual(r1.dir, r2.dir, "each review gets its own worktree");
 
   // First review finishes — the shared repo must stay protected for the second.
-  await cleanupCheckout({ config, ref });
+  await cleanupCheckout({ config, ref, token: r1.bare });
   const freed = await evictWorkspace({
     workspaceRoot: config.dirs.workspaceRoot,
     workspaceMaxBytes: 1,
@@ -273,11 +273,32 @@ test("overlapping reviews on the same repo stay protected until the last one fin
   assert.ok(existsSync(r2.dir), "second review's worktree intact");
 
   // Second review finishes — with the last ref released, eviction may reclaim.
-  await cleanupCheckout({ config, ref });
+  await cleanupCheckout({ config, ref, token: r2.bare });
   const freedAfter = await evictWorkspace({
     workspaceRoot: config.dirs.workspaceRoot,
     workspaceMaxBytes: 1,
     keepBare: null,
   });
   assert.ok(freedAfter > 0, "repo evictable once the last review finished");
+});
+
+test("a failed checkout does not release a concurrent review's protection (PR #12 MEDIUM)", async () => {
+  const { remote, sha1 } = makeRemote();
+  const config = baseConfig();
+  const good = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  assert.equal(good.ok, true, good.reason);
+
+  // Concurrent review of the same repo fails its checkout (unknown SHA) — it
+  // never acquired protection, so the pipeline's finally passes token=null.
+  const bad = await prepareCheckout({ config, ref, sha: "0000000000000000000000000000000000000000", branch: "main", origin: remote });
+  assert.equal(bad.ok, false, "failed checkout returns ok:false");
+
+  await cleanupCheckout({ config, ref, token: null });
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null,
+  });
+  assert.equal(freed, 0, "failed review must not release the good review's protection");
+  assert.ok(existsSync(good.dir), "good review's worktree still intact");
 });

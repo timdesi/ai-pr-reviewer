@@ -509,7 +509,19 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
       const handle = r.name.slice(0, -".git".length);
       return !existsSync(path.join(workspaceRoot, `.lock-${handle}`));
     })
-    .sort((a, b) => statSync(a.dir).mtimeMs - statSync(b.dir).mtimeMs); // oldest first
+    // Attach mtime outside the sort so a dir that vanishes between readdir and
+    // stat (concurrent remove/eviction) can't throw out of the whole reclaim
+    // (AI review, PR #12 minor) — a missing dir sorts as oldest.
+    .map((r) => {
+      let mtime = 0;
+      try {
+        mtime = statSync(r.dir).mtimeMs;
+      } catch {
+        mtime = 0;
+      }
+      return { ...r, mtime };
+    })
+    .sort((a, b) => a.mtime - b.mtime); // oldest first
 
   let freed = 0;
   for (const repo of repos) {
@@ -548,6 +560,11 @@ export async function maintainCheckout(config) {
   const gate = config.checkout.gcPacks ?? 20;
   for (const e of readdirSync(root, { withFileTypes: true })) {
     if (!e.isDirectory() || !e.name.endsWith(".git")) continue;
+    // Never gc a repo that a concurrent review is mid-fetch on (live checkout
+    // lock) — running gc against an in-progress fetch can corrupt/bounce the
+    // object store (AI review, PR #12 minor).
+    const handle = e.name.slice(0, -".git".length);
+    if (existsSync(path.join(root, `.lock-${handle}`))) continue;
     try {
       await maintainBare(path.join(root, e.name), { packs: gate });
     } catch (err) {
@@ -636,10 +653,16 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
   }
 }
 
-export async function cleanupCheckout({ config, ref }) {
+export async function cleanupCheckout({ config, ref, token }) {
   try {
     if (!config.checkout?.enabled) return;
-    releaseBare(bareRepoDir({ workspaceRoot: config.dirs.workspaceRoot, ref }));
+    // Only release the active-checkout protection for a checkout this review
+    // actually acquired. The caller passes `token` (the bare dir) only on a
+    // successful prepareCheckout; an unconditional release would decrement a
+    // *concurrent* review's refcount on the same busy repo when this review's
+    // own checkout failed, unprotecting a live worktree (AI review, PR #12
+    // MEDIUM).
+    if (token) releaseBare(token);
     await pruneWorktrees({ workspaceRoot: config.dirs.workspaceRoot, ref, keep: config.checkout.keep });
   } catch (err) {
     log.warn(`checkout cleanup failed: ${err.message}`);

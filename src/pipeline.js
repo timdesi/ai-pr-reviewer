@@ -353,12 +353,16 @@ export async function runReview({ ref, config, options = {} }) {
 
   // 4. Run the active reviewers in parallel (with bounded retries). A/B/C run
   // on every review; reviewer D joins when the PR is a translation/content PR.
+  // `checkout` is hoisted so the finally can pass its protection token back to
+  // cleanupCheckout — it must never be released for a review whose checkout
+  // failed (that would unprotect a concurrent review on the same repo).
+  let checkout = null;
   try {
     // 2b. (optional) Shallow git checkout of the reviewed commit, so reviewers
     // can read real files beyond the diff. Best-effort: any failure degrades to
     // "no checkout" and the review proceeds on diff + context alone.
     let agentCwd = null;
-    const checkout = await prepareCheckout({
+    checkout = await prepareCheckout({
       config,
       ref,
       sha: reviewedSha,
@@ -544,7 +548,9 @@ export async function runReview({ ref, config, options = {} }) {
     fire("error", { message: err.message });
     throw err;
   } finally {
-    await cleanupCheckout({ config, ref });
+    // `token` is the bare dir only when this review actually got a checkout —
+    // cleanupCheckout releases protection exclusively through it.
+    await cleanupCheckout({ config, ref, token: checkout?.ok ? checkout.bare : null });
   }
 }
 
