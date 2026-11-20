@@ -1697,6 +1697,8 @@ function schedulePullRefresh(delayMs = SSE_REFRESH_DEBOUNCE_MS) {
   if (pullRefreshTimer) return; // one refresh already queued
   pullRefreshTimer = setTimeout(() => {
     pullRefreshTimer = null;
+    // Re-check on fire: the tab may have gone hidden while the timer waited.
+    if (document.visibilityState === "hidden") return;
     fetchPulls({ quiet: true });
   }, delayMs);
 }
@@ -1710,7 +1712,10 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-pollPullsTick();
+// Start the first tick after a full cycle (+jitter) — the boot fetchPulls()
+// above already covered page load, so firing pollPullsTick() immediately would
+// send a second redundant live-fetch burst right away.
+pullPollTimer = setTimeout(pollPullsTick, PULL_POLL_MS + Math.round(Math.random() * PULL_POLL_JITTER_MS));
 
 // ---- mode toggle / app filter / refresh ------------------------------------
 

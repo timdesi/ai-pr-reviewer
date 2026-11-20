@@ -204,13 +204,18 @@ async function enrichOne(pull, client, { ttlMs }) {
   });
   // Waiters share the promise but must never see a rejection (fetchHeadState
   // catches internally; this guards against unexpected programmer errors).
-  inflight.set(pull.key, fetching.catch(() => null));
+  const guarded = fetching.catch(() => null);
+  inflight.set(pull.key, guarded);
   try {
     await fetching;
   } catch (err) {
     log.warn(`pulls: unexpected enrichment failure for ${pull.key}: ${err?.message || err}`);
   } finally {
-    inflight.delete(pull.key);
+    // A review completion can clearPullCache() while this fetch is still in
+    // flight; a newer caller may then have installed a fresh entry for the same
+    // PR. Delete the entry only if it is still ours, so a stale settle cannot
+    // evict a newer in-flight promise (and reopen the duplicate-request window).
+    if (inflight.get(pull.key) === guarded) inflight.delete(pull.key);
   }
 }
 
