@@ -6,7 +6,7 @@
 //   - a `status.json` file written into the job dir after every meaningful
 //     state change (so jobs started by the CLI can be inspected afterwards).
 
-import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, statSync, rmSync } from "node:fs";
 import path from "node:path";
 
 import { createReviewClient, botUsernamesOf, prCommentUrl, reportBaseUrl } from "./clients.js";
@@ -178,13 +178,19 @@ export async function runReview({ ref, config, options = {} }) {
   const jobDir = path.join(jobsDir, jobName);
   // ENOSPC guard (issue #11): if the shared PVC is full, reclaim the checkout
   // workspace (gc + LRU eviction) once and retry before failing cleanly —
-  // instead of dying with a raw "no space left on device".
+  // instead of dying with a raw "no space left on device". When the workspace
+  // reclaim has nothing to give (e.g. REVIEW_CHECKOUT=0, or every repo is
+  // protected/in-use), also drop the oldest finished review job dirs — the PVC
+  // holds /app/data/jobs too (PR #12 AI review).
   try {
     mkdirSync(jobDir, { recursive: true });
   } catch (err) {
     if (err.code !== "ENOSPC") throw err;
     log.warn(`job dir ENOSPC (${err.message}); reclaiming checkout workspace and retrying`);
-    await maintainCheckout(config);
+    const reclaimed = await maintainCheckout(config);
+    if (!reclaimed?.freedBytes) {
+      await reclaimOldJobDirs(config, { skipDir: jobDir });
+    }
     try {
       mkdirSync(jobDir, { recursive: true });
     } catch (err2) {
@@ -882,6 +888,57 @@ export function finalizeStaleJobs(config) {
     }
   }
   return finalized;
+}
+
+// A finished review job dir must be at least this old before the ENOSPC reclaim
+// may delete it — conservative, so a job that just started (or whose metadata is
+// still being written) can never be mistaken for garbage.
+const JOB_RECLAIM_MIN_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Emergency job-dir reclaim for the ENOSPC path (issue #11 / PR #12 AI review):
+ * when the checkout-workspace reclaim freed nothing (REVIEW_CHECKOUT=0, or every
+ * repo is protected/in-use), drop the oldest *finished* review job dirs — the
+ * PVC also holds /app/data/jobs. Conservative: a dir is touched only when its
+ * status.json is NOT a running stage AND its job-meta.json startedAt is at least
+ * an hour old (a missing/undeterminable start is left alone). Returns the number
+ * of job dirs removed.
+ */
+export function reclaimOldJobDirs(config, { skipDir = null } = {}) {
+  const jobsDir = config.dirs.jobs;
+  if (!existsSync(jobsDir)) return 0;
+  let entries = [];
+  try {
+    entries = readdirSync(jobsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .filter((name) => !name.startsWith("."));
+  } catch {
+    return 0;
+  }
+  const now = Date.now();
+  const candidates = [];
+  for (const name of entries) {
+    const dir = path.join(jobsDir, name);
+    if (skipDir && path.resolve(dir) === path.resolve(skipDir)) continue;
+    const status = readFileJson(path.join(dir, "status.json")) || {};
+    if (RUNNING_STAGES.has(status.stage)) continue; // in-flight — never touch
+    const started = new Date(readFileJson(path.join(dir, "job-meta.json"))?.startedAt || 0).getTime();
+    if (!started || started <= 0 || now - started < JOB_RECLAIM_MIN_AGE_MS) continue;
+    candidates.push({ dir, started });
+  }
+  candidates.sort((a, b) => a.started - b.started); // oldest first
+  let removed = 0;
+  for (const c of candidates) {
+    try {
+      rmSync(c.dir, { recursive: true, force: true });
+      removed += 1;
+      log.warn(`jobs: ENOSPC reclaim removed finished job ${path.basename(c.dir)} (started ${new Date(c.started).toISOString()})`);
+    } catch (err) {
+      log.warn(`jobs: ENOSPC reclaim failed for ${path.basename(c.dir)}: ${err.message}`);
+    }
+  }
+  return removed;
 }
 
 function statTime(jobsDir, name) {

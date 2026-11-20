@@ -526,7 +526,24 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
   let freed = 0;
   for (const repo of repos) {
     if (total - freed <= workspaceMaxBytes) break;
-    const size = await removeBareAndWorktrees(workspaceRoot, repo.name);
+    const handle = repo.name.slice(0, -".git".length);
+    const lockPath = path.join(workspaceRoot, `.lock-${handle}`);
+    // The protection filter above ran before any await; re-check and take the
+    // per-repo lock (mkdir) so a concurrent prepareCheckout can't start a fetch
+    // on a repo we then delete out from under it — that would leave the review
+    // with a worktree whose bare is gone (TOCTOU, AI review, PR #12 MEDIUM).
+    if (activeBares.has(repo.dir)) continue; // became active since the filter
+    try {
+      mkdirSync(lockPath);
+    } catch {
+      continue; // lock held → a review is mid-checkout on this repo
+    }
+    let size = 0;
+    try {
+      size = await removeBareAndWorktrees(workspaceRoot, repo.name);
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
     // If the size measurement failed (du gone, dir vanished) we cannot trust the
     // budget accounting — stop here rather than cascade a full cache wipe on a
     // roll of bad measurements (AI review, PR #12 minor).
@@ -561,10 +578,13 @@ export async function maintainCheckout(config) {
   for (const e of readdirSync(root, { withFileTypes: true })) {
     if (!e.isDirectory() || !e.name.endsWith(".git")) continue;
     // Never gc a repo that a concurrent review is mid-fetch on (live checkout
-    // lock) — running gc against an in-progress fetch can corrupt/bounce the
-    // object store (AI review, PR #12 minor).
+    // lock) or still reading after its checkout finished (active set) — the
+    // same protection eviction applies. gc'ing an in-use object store can
+    // repack/prune underneath the review's file reads (AI review, PR #12
+    // MEDIUM).
     const handle = e.name.slice(0, -".git".length);
     if (existsSync(path.join(root, `.lock-${handle}`))) continue;
+    if (activeBares.has(path.join(root, e.name))) continue;
     try {
       await maintainBare(path.join(root, e.name), { packs: gate });
     } catch (err) {
@@ -624,27 +644,32 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       });
       const wt = await ensureWorktree({ workspaceRoot, ref, sha, bare });
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
+      // Mark the checkout in use *now* — before maintenance — so a concurrent
+      // reclaim can never touch it, and so a maintenance failure below still
+      // leaves a valid, protected checkout instead of being turned into a
+      // "no checkout" (AI review, PR #12 MEDIUM). Refcounted so overlapping
+      // reviews on the same repo stay protected until the last finish.
+      protectBare(bare);
       // Disk maintenance (issue #11): consolidate this repo's packs before they
       // accumulate, and evict LRU repos if the workspace grew past its budget.
-      // The LRU eviction's full-workspace `du` is throttled (once per interval)
-      // — the statfs free-space guard above and the ENOSPC reclaim still react
-      // immediately when the volume is tight.
-      await maintainBare(bare, { packs: config.checkout.gcPacks ?? 20 });
-      const nowEvict = Date.now();
-      if (nowEvict - lastEvictionCheckAt >= EVICTION_CHECK_INTERVAL_MS) {
-        lastEvictionCheckAt = nowEvict;
-        await evictWorkspace({
-          workspaceRoot,
-          workspaceMaxBytes: config.checkout.workspaceMaxBytes ?? 0,
-          keepBare: bare,
-        });
+      // Best-effort: a maintenance failure (e.g. gc hitting ENOSPC writing its
+      // temp pack) logs and keeps the checkout already built. The LRU eviction's
+      // full-workspace `du` is throttled (once per interval) — the statfs
+      // free-space guard above and the ENOSPC reclaim still react immediately.
+      try {
+        await maintainBare(bare, { packs: config.checkout.gcPacks ?? 20 });
+        const nowEvict = Date.now();
+        if (nowEvict - lastEvictionCheckAt >= EVICTION_CHECK_INTERVAL_MS) {
+          lastEvictionCheckAt = nowEvict;
+          await evictWorkspace({
+            workspaceRoot,
+            workspaceMaxBytes: config.checkout.workspaceMaxBytes ?? 0,
+            keepBare: bare,
+          });
+        }
+      } catch (err) {
+        log.warn(`checkout maintenance failed (${err.message}); keeping the existing checkout`);
       }
-      // Mark this repo's checkout as in use so a concurrent/emergency eviction
-      // never deletes the worktree while the review agents are running against
-      // it (they hold no lock after prepareCheckout returns). Refcounted so
-      // overlapping reviews on the same repo stay protected until the last
-      // finish.
-      protectBare(bare);
       return { ok: true, dir: wt, bare, sha };
     });
   } catch (err) {

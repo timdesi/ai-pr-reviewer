@@ -5,8 +5,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { sanitize, jobPrefixFor } from "../src/pipeline.js";
+import { sanitize, jobPrefixFor, reclaimOldJobDirs } from "../src/pipeline.js";
 
 test("jobPrefixFor: Bitbucket prefixes stay byte-for-byte unchanged", () => {
   assert.equal(jobPrefixFor({ projectKey: "ACME", repoSlug: "acme-app", prId: 42 }), "ACME-acme-app-PR42-");
@@ -32,4 +35,32 @@ test("jobPrefixFor: GitHub is namespaced with github@ (cannot be produced by Bit
 test("sanitize preserves the @ namespace marker and folds the rest", () => {
   assert.equal(sanitize("github@A.CME app_P3"), "github@A.CME-app_P3");
   assert.equal(sanitize("no markers here"), "no-markers-here");
+});
+
+test("reclaimOldJobDirs removes only finished jobs older than the safety window (PR #12 AI review)", () => {
+  const jobsDir = mkdtempSync(path.join(tmpdir(), "jobs-reclaim-"));
+  const startedAt = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  const make = (name, { stage, metaAgo }) => {
+    const dir = path.join(jobsDir, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "status.json"), JSON.stringify({ stage }));
+    if (metaAgo != null) {
+      writeFileSync(path.join(dir, "job-meta.json"), JSON.stringify({ startedAt: startedAt(metaAgo) }));
+    }
+    return dir;
+  };
+
+  const oldDone = make("old-done", { stage: "done", metaAgo: 3 * 60 * 60 * 1000 }); // eligible
+  const oldRunning = make("old-running", { stage: "review", metaAgo: 3 * 60 * 60 * 1000 }); // in-flight
+  const freshDone = make("fresh-done", { stage: "done", metaAgo: 60 * 1000 }); // too new
+  make("no-meta", { stage: "failed", metaAgo: null }); // undeterminable start
+  const skip = make("skip-me", { stage: "done", metaAgo: 5 * 60 * 60 * 1000 }); // explicitly excluded
+
+  const removed = reclaimOldJobDirs({ dirs: { jobs: jobsDir } }, { skipDir: skip });
+  assert.equal(removed, 1, "only the old finished job is reclaimed");
+  assert.ok(!existsSync(oldDone), "old finished job removed");
+  assert.ok(existsSync(oldRunning), "running job untouched");
+  assert.ok(existsSync(freshDone), "young finished job untouched");
+  assert.ok(existsSync(path.join(jobsDir, "no-meta")), "job without metadata untouched");
+  assert.ok(existsSync(skip), "skipDir untouched");
 });
