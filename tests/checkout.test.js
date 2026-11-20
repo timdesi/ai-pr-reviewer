@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { scmUrl, prepareCheckout, maintainBare, evictWorkspace, packCount } from "../src/checkout.js";
+import { scmUrl, prepareCheckout, cleanupCheckout, maintainBare, evictWorkspace, packCount } from "../src/checkout.js";
 
 const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 1 };
 
@@ -197,6 +197,11 @@ test("eviction removes only the evicted repo's worktree: name-prefix sibling sur
   assert.ok(existsSync(rShort.dir), "short repo worktree present before eviction");
   assert.ok(existsSync(rLong.dir), "long (prefix-extension) repo worktree present before eviction");
 
+  // Simulate both reviews having finished (the real finally calls cleanupCheckout)
+  // so neither is in the active-protection set and eviction may reclaim the old one.
+  await cleanupCheckout({ config, ref: refShort });
+  await cleanupCheckout({ config, ref: refLong });
+
   // Age the short repo so LRU evicts it first; keepBare protects the long one.
   const { utimesSync } = await import("node:fs");
   const past = new Date(Date.now() - 600_000);
@@ -212,4 +217,36 @@ test("eviction removes only the evicted repo's worktree: name-prefix sibling sur
   assert.ok(!existsSync(rShort.dir), "evicted repo's own worktree removed");
   assert.ok(existsSync(rLong.bare), "prefix-extension sibling's bare NOT evicted");
   assert.ok(existsSync(rLong.dir), "prefix-extension sibling's worktree NOT evicted");
+});
+
+test("active review checkout is protected from eviction until cleanup (PR #12 MEDIUM)", async () => {
+  const { remote, sha1 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+
+  // Age it so plain LRU would pick it first — but the checkout is in the active
+  // set, so even an emergency reclaim that doesn't pass keepBare must skip it.
+  const { utimesSync } = await import("node:fs");
+  const past = new Date(Date.now() - 600_000);
+  utimesSync(res.bare, past, past);
+
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null, // no active repo hint — protection comes from the set
+  });
+  assert.equal(freed, 0, "active review repo must not be evicted");
+  assert.ok(existsSync(res.bare), "active bare protected while review runs");
+  assert.ok(existsSync(res.dir), "active worktree protected while review runs");
+
+  // Once the review finishes (finally → cleanupCheckout), eviction may reclaim.
+  await cleanupCheckout({ config, ref });
+  const freedAfter = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: null,
+  });
+  assert.ok(freedAfter > 0, "repo becomes evictable after cleanupCheckout");
+  assert.ok(!existsSync(res.bare), "bare reclaimed after review done");
 });

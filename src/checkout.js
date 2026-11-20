@@ -317,6 +317,13 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
 const EVICTION_CHECK_INTERVAL_MS = 60_000;
 let lastEvictionCheckAt = 0;
 
+// Bare repos whose checkout is currently handed to a running review (added when
+// prepareCheckout succeeds, cleared in cleanupCheckout's finally). The per-repo
+// `.lock-*` is only held inside prepareCheckout — the review agents then run
+// against the worktree with no lock, so a reclaim must not evict a repo that is
+// in active use (AI review, PR #12 MEDIUM). Eviction skips every bare in here.
+const activeBares = new Set();
+
 /** Number of `.pack` files in a bare repo's object store (0 when absent). */
 export function packCount(bare) {
   try {
@@ -483,6 +490,7 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
     .map((e) => ({ name: e.name, dir: path.join(workspaceRoot, e.name) }))
     .filter((r) => {
       if (r.dir === keepBare) return false;
+      if (activeBares.has(r.dir)) return false; // worktree in use by a running review
       // A held checkout lock means another review is mid-checkout on this repo —
       // never evict an object store that is actively being fetched into (AI
       // review, PR #12 minor).
@@ -495,6 +503,10 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
   for (const repo of repos) {
     if (total - freed <= workspaceMaxBytes) break;
     const size = await removeBareAndWorktrees(workspaceRoot, repo.name);
+    // If the size measurement failed (du gone, dir vanished) we cannot trust the
+    // budget accounting — stop here rather than cascade a full cache wipe on a
+    // roll of bad measurements (AI review, PR #12 minor).
+    if (size === 0) break;
     freed += size;
     log.warn(`workspace: evicted LRU bare repo ${repo.name} (workspace ${total} > ${workspaceMaxBytes} budget, freed ${size} bytes)`);
   }
@@ -509,19 +521,27 @@ export async function maintainCheckout(config) {
   const root = config.dirs.workspaceRoot;
   if (!config.checkout?.enabled || !existsSync(root)) return { freedBytes: 0 };
   let freedBytes = 0;
-  for (const e of readdirSync(root, { withFileTypes: true })) {
-    if (!e.isDirectory() || !e.name.endsWith(".git")) continue;
-    try {
-      await maintainBare(path.join(root, e.name), { packs: 1 });
-    } catch (err) {
-      log.warn(`workspace: gc failed for ${e.name}: ${err.message}`);
-    }
-  }
+  // 1) Free space immediately: evict LRU repos (bare + their worktrees) down to
+  //    the workspace budget. This is the cheap big win on a full volume — gc
+  //    needs scratch space, which eviction just freed, so gc must come *after*
+  //    eviction (AI review, PR #12 MEDIUM). Active reviews' repos are skipped
+  //    by evictWorkspace's protected set.
   freedBytes += await evictWorkspace({
     workspaceRoot: root,
     workspaceMaxBytes: config.checkout.workspaceMaxBytes,
     keepBare: null,
   });
+  // 2) Then consolidate packs on the survivors, gated at the configured pack
+  //    count (not 1 — don't run gc on every repo on every reclaim).
+  const gate = config.checkout.gcPacks ?? 20;
+  for (const e of readdirSync(root, { withFileTypes: true })) {
+    if (!e.isDirectory() || !e.name.endsWith(".git")) continue;
+    try {
+      await maintainBare(path.join(root, e.name), { packs: gate });
+    } catch (err) {
+      log.warn(`workspace: gc failed for ${e.name}: ${err.message}`);
+    }
+  }
   return { freedBytes };
 }
 
@@ -590,6 +610,10 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
           keepBare: bare,
         });
       }
+      // Mark this repo's checkout as in use so a concurrent/emergency eviction
+      // never deletes the worktree while the review agents are running against
+      // it (they hold no lock after prepareCheckout returns).
+      activeBares.add(bare);
       return { ok: true, dir: wt, bare, sha };
     });
   } catch (err) {
@@ -601,6 +625,7 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
 export async function cleanupCheckout({ config, ref }) {
   try {
     if (!config.checkout?.enabled) return;
+    activeBares.delete(bareRepoDir({ workspaceRoot: config.dirs.workspaceRoot, ref }));
     await pruneWorktrees({ workspaceRoot: config.dirs.workspaceRoot, ref, keep: config.checkout.keep });
   } catch (err) {
     log.warn(`checkout cleanup failed: ${err.message}`);
