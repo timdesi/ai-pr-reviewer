@@ -296,6 +296,18 @@ export function loadConfig({ envFile } = {}) {
       // gives up (issue #6).
       lowSpeedLimit: int("CHECKOUT_LOW_SPEED_LIMIT", 1024),
       lowSpeedTime: int("CHECKOUT_LOW_SPEED_TIME", 30),
+      // Workspace disk guards (issue #11 — bare-repo git packs accumulated
+      // unbounded until the 2 GiB PVC was 100% full and reviews failed ENOSPC):
+      //   - gcPacks: once a bare repo reaches this many pack files, `git gc`
+      //     consolidates them (each shallow fetch appends a pack otherwise).
+      //   - workspaceMaxBytes: when the whole WORKSPACE_ROOT exceeds this, the
+      //     least-recently-used bare repos are evicted to stay under budget.
+      //   - diskMinFreeBytes: before a fetch, if the volume has less free space
+      //     than this, reclaim first (gc + evict) instead of fetcing into a full
+      //     disk.
+      gcPacks: int("CHECKOUT_GC_PACKS", 20),
+      workspaceMaxBytes: int("CHECKOUT_WORKSPACE_MAX_BYTES", 1536 * 1024 * 1024),
+      diskMinFreeBytes: int("DISK_MIN_FREE_BYTES", 128 * 1024 * 1024),
     },
     server: {
       host: str("HOST", "127.0.0.1"),

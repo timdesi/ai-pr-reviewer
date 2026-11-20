@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { scmUrl, prepareCheckout } from "../src/checkout.js";
+import { scmUrl, prepareCheckout, maintainBare, evictWorkspace, packCount } from "../src/checkout.js";
 
 const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 1 };
 
@@ -126,4 +126,55 @@ test("worktrees are pruned to CHECKOUT_KEEP (older SHA removed)", async () => {
   assert.equal(r2.ok, true);
   assert.ok(existsSync(r2.dir), "newest worktree must survive pruning");
   assert.ok(!existsSync(r1.dir), "oldest worktree must be pruned with keep=1");
+});
+
+test("workspace disk maintenance: git gc packs loose objects and keeps the SHA reachable (issue #11)", async () => {
+  const { remote, sha1 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+  // A tiny local remote arrives as *loose* objects (under git's unpack limit).
+  const looseBefore = countLoose(res.bare);
+  assert.ok(looseBefore > 0, `expect loose objects before gc (got ${looseBefore})`);
+  // packs:0 = every call maintains. Production gates this at CHECKOUT_GC_PACKS.
+  await maintainBare(res.bare, { packs: 0 });
+  assert.ok(countLoose(res.bare) < looseBefore, "gc packed the loose objects");
+  const chk = spawnSync("git", ["--git-dir", res.bare, "cat-file", "-e", `${sha1}^{commit}`], { encoding: "utf8" });
+  assert.equal(chk.status, 0, "reviewed SHA still resolvable after gc");
+});
+
+function countLoose(bare) {
+  const r = spawnSync("git", ["--git-dir", bare, "count-objects", "-v"], { encoding: "utf8" });
+  const m = /^\s*count:\s*(\d+)$/m.exec(r.stdout || "");
+  return m ? Number(m[1]) : 0;
+}
+
+test("workspace disk maintenance: LRU eviction frees space but keeps the active repo (issue #11)", async () => {
+  const { remote, sha1 } = makeRemote();
+  const config = baseConfig();
+  const res = await prepareCheckout({ config, ref, sha: sha1, branch: "main", origin: remote });
+  assert.equal(res.ok, true, res.reason);
+
+  // Two additional bare repos that should be evicted first (the active one is
+  // protected by keepBare).
+  const otherA = path.join(config.dirs.workspaceRoot, "acme-other-a.git");
+  const otherB = path.join(config.dirs.workspaceRoot, "acme-other-b.git");
+  for (const d of [otherA, otherB]) gitIn(config.dirs.workspaceRoot, ["init", "--bare", d]);
+  // Age A and B so LRU picks them (not the just-fetched active repo).
+  for (const d of [otherA, otherB]) {
+    const past = new Date(Date.now() - 600_000);
+    const { utimesSync } = await import("node:fs");
+    utimesSync(d, past, past);
+  }
+
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1, // absurdly small budget → evict everything evictable
+    keepBare: res.bare,
+  });
+  assert.ok(freed > 0, "budget eviction freed bytes");
+  assert.ok(!existsSync(otherA), "oldest dummy bare repo evicted");
+  assert.ok(!existsSync(otherB), "second dummy bare repo evicted");
+  assert.ok(existsSync(res.bare), "active bare repo NOT evicted");
+  assert.ok(existsSync(res.dir), "active worktree NOT evicted");
 });

@@ -19,7 +19,8 @@
 // `CHECKOUT_KEEP` newest per repo after each review (git worktree prune), so a
 // large repository cannot fill the 2 GiB volume.
 
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -298,6 +299,133 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
   await git(["--git-dir", bare, "worktree", "prune"]);
 }
 
+// --- workspace disk maintenance (issue #11) ----------------------------------
+//
+// The warm bare per-repo caches grow *monotonically*: every shallow fetch
+// appends a new pack, and nothing consolidated them, so a busy repo (ppc-main)
+// reached 113 packs / ~700 MB and filled the 2 GiB PVC until a review died with
+// ENOSPC mid-start. Prevention is (a) `git gc` once a repo has too many packs,
+// (b) an LRU budget on the whole workspace, and (c) a free-space guard before
+// any fetch. All best-effort — a failure only means less caching, never a
+// broken review (they degrade to "no checkout" like the rest of this module).
+
+/** Number of `.pack` files in a bare repo's object store (0 when absent). */
+export function packCount(bare) {
+  try {
+    return readdirSync(path.join(bare, "objects", "pack")).filter((n) => n.endsWith(".pack")).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Consolidate a bare repo's packs (`git gc --prune=now`). Throws on failure. */
+async function gcBare(bare) {
+  const r = await git(["--git-dir", bare, "gc", "--prune=now", "--quiet"]);
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    throw new Error(`git gc failed: ${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+  }
+}
+
+/**
+ * Run `git gc` on a bare repo once its pack count reaches `packs` (default from
+ * config). Cheap when under the gate — a single readdir. Keeps the object store
+ * bounded instead of growing one pack per fetch forever.
+ */
+export async function maintainBare(bare, { packs = 20 } = {}) {
+  if (packCount(bare) >= packs) {
+    log.warn(`workspace: ${path.basename(bare)} has ${packCount(bare)} packs; running git gc`);
+    await gcBare(bare);
+  }
+}
+
+/** Total bytes of a path via `du -sk` (portable across BSD/GNU; 0 on failure). */
+function duBytes(dir) {
+  return new Promise((resolve) => {
+    const child = spawn("du", ["-s", "-k", dir], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.on("error", () => resolve(0));
+    child.on("close", () => {
+      const kb = out.trim().split(/\s+/)[0];
+      resolve(/^\d+$/.test(kb) ? Number(kb) * 1024 : 0);
+    });
+  });
+}
+
+/** Free bytes on the volume hosting `dir`, via fs.statfs (Infinity if unknown). */
+async function freeBytes(dir) {
+  try {
+    const s = await fsp.statfs(dir);
+    return Number(s.bavail) * Number(s.bsize);
+  } catch {
+    return Infinity; // statfs unavailable → never preemptively guard
+  }
+}
+
+/** Remove every worktree dir that belongs to `bareName` (prefix match). */
+function removeRepoWorktrees(workspaceRoot, bareName) {
+  const prefix = `${bareName.slice(0, -".git".length)}-`;
+  for (const e of readdirSync(workspaceRoot, { withFileTypes: true })) {
+    if (e.isDirectory() && e.name.startsWith(prefix)) {
+      rmSync(path.join(workspaceRoot, e.name), { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Keep WORKSPACE_ROOT under `workspaceMaxBytes`: when the total exceeds the
+ * budget, evict the least-recently-used bare repos (oldest first, never the
+ * one active in this checkout) together with their worktrees. Bare repos are
+ * only a warm cache — the next review re-fetches them. Returns bytes freed.
+ */
+export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, keepBare = null }) {
+  if (!existsSync(workspaceRoot) || !workspaceMaxBytes) return 0;
+  const total = await duBytes(workspaceRoot);
+  if (total <= workspaceMaxBytes) return 0;
+
+  const repos = readdirSync(workspaceRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name.endsWith(".git"))
+    .map((e) => ({ name: e.name, dir: path.join(workspaceRoot, e.name) }))
+    .filter((r) => r.dir !== keepBare)
+    .sort((a, b) => statSync(a.dir).mtimeMs - statSync(b.dir).mtimeMs); // oldest first
+
+  let freed = 0;
+  for (const repo of repos) {
+    if (total - freed <= workspaceMaxBytes) break;
+    const size = await duBytes(repo.dir);
+    rmSync(repo.dir, { recursive: true, force: true });
+    removeRepoWorktrees(workspaceRoot, repo.name);
+    freed += size;
+    log.warn(`workspace: evicted LRU bare repo ${repo.name} (workspace ${total} > ${workspaceMaxBytes} budget)`);
+  }
+  return freed;
+}
+
+/**
+ * Emergency reclaim for the whole workspace (used when the volume is low):
+ * gc every bare repo and evict LRU repos down to the budget.
+ */
+export async function maintainCheckout(config) {
+  const root = config.dirs.workspaceRoot;
+  if (!config.checkout?.enabled || !existsSync(root)) return { freedBytes: 0 };
+  let freedBytes = 0;
+  for (const e of readdirSync(root, { withFileTypes: true })) {
+    if (!e.isDirectory() || !e.name.endsWith(".git")) continue;
+    try {
+      await maintainBare(path.join(root, e.name), { packs: 1 });
+    } catch (err) {
+      log.warn(`workspace: gc failed for ${e.name}: ${err.message}`);
+    }
+  }
+  freedBytes += await evictWorkspace({
+    workspaceRoot: root,
+    workspaceMaxBytes: config.checkout.workspaceMaxBytes,
+    keepBare: null,
+  });
+  return { freedBytes };
+}
+
 /**
  * Prepare a checkout of `reviewedSha` for one review. Best-effort: returns
  * `{ ok: false, reason }` on any failure instead of throwing.
@@ -321,6 +449,15 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       return { ok: false, reason: "github backend not configured (GITHUB_TOKEN)" };
     }
     return await withLock(lock, async () => {
+      // If the workspace volume is nearly full, reclaim before even trying to
+      // fetch — otherwise the fetch (or a later job-dir mkdir) dies with ENOSPC
+      // (issue #11). Best-effort: if we still can't free enough, the fetch below
+      // simply fails and the review degrades to "no checkout".
+      const minFree = config.checkout.diskMinFreeBytes;
+      if (typeof minFree === "number" && (await freeBytes(workspaceRoot)) < minFree) {
+        log.warn("workspace: free space low; running maintenance before checkout");
+        await maintainCheckout(config);
+      }
       const bare = await ensureFetched({
         baseUrl: backend.baseUrl,
         token: backend.token,
@@ -339,6 +476,14 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       });
       const wt = await ensureWorktree({ workspaceRoot, ref, sha, bare });
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
+      // Disk maintenance (issue #11): consolidate this repo's packs before they
+      // accumulate, and evict LRU repos if the workspace grew past its budget.
+      await maintainBare(bare, { packs: config.checkout.gcPacks ?? 20 });
+      await evictWorkspace({
+        workspaceRoot,
+        workspaceMaxBytes: config.checkout.workspaceMaxBytes ?? 0,
+        keepBare: bare,
+      });
       return { ok: true, dir: wt, bare, sha };
     });
   } catch (err) {

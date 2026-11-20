@@ -11,7 +11,7 @@ import path from "node:path";
 
 import { createReviewClient, botUsernamesOf, prCommentUrl, reportBaseUrl } from "./clients.js";
 import { buildReviewerContext, buildConsensusContext, loadProjectContext } from "./context.js";
-import { prepareCheckout, cleanupCheckout } from "./checkout.js";
+import { prepareCheckout, cleanupCheckout, maintainCheckout } from "./checkout.js";
 import { runAgent } from "./opencode.js";
 import { extractTrailingJson } from "./extractJson.js";
 import { validateReviewerReport, validateConsensusReport, repairReportKeys } from "./validate.js";
@@ -176,7 +176,24 @@ export async function runReview({ ref, config, options = {} }) {
   const reviewedSha = from.latestCommit || from.id;
   const jobName = `${jobPrefixFor(ref)}${reviewedSha?.slice(0, 8)}`;
   const jobDir = path.join(jobsDir, jobName);
-  mkdirSync(jobDir, { recursive: true });
+  // ENOSPC guard (issue #11): if the shared PVC is full, reclaim the checkout
+  // workspace (gc + LRU eviction) once and retry before failing cleanly —
+  // instead of dying with a raw "no space left on device".
+  try {
+    mkdirSync(jobDir, { recursive: true });
+  } catch (err) {
+    if (err.code !== "ENOSPC") throw err;
+    log.warn(`job dir ENOSPC (${err.message}); reclaiming checkout workspace and retrying`);
+    await maintainCheckout(config);
+    try {
+      mkdirSync(jobDir, { recursive: true });
+    } catch (err2) {
+      if (err2.code === "ENOSPC") {
+        throw new Error(`no disk space for review job after workspace reclaim (ENOSPC): ${err2.message}`);
+      }
+      throw err2;
+    }
+  }
 
   status.job = jobName;
   status.title = pullRequest.title;
