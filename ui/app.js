@@ -1599,7 +1599,7 @@ function handleEvent(e) {
     state.artifacts[e.jobName] = null;
     state.liveText[e.jobName] = {};
     selectJob(e.jobName);
-    fetchPulls({ quiet: true });
+    schedulePullRefresh();
   } else if (e.type === "complete" || e.type === "error" || e.type === "jobs-changed") {
     if (e.job) {
       delete state.liveText[e.job];
@@ -1607,7 +1607,7 @@ function handleEvent(e) {
     }
     fetchJobs();
     if (state.selected) refreshDetail().then(renderTabs);
-    fetchPulls({ quiet: true });
+    schedulePullRefresh();
   } else if (["stage", "agent-start", "agent-attempt", "agent-done"].includes(e.type)) {
     if (e.type === "agent-start") {
       const b = (state.liveText[e.job] = state.liveText[e.job] || {});
@@ -1667,10 +1667,50 @@ setInterval(() => {
 }, 5000);
 // Head/commit state is cached server-side for 60s, so a 30s poll stays cheap.
 // The stats page refreshes itself while it's the active view.
-setInterval(() => {
-  fetchPulls({ quiet: true });
-  if (state.mode === "stats") fetchStats({ quiet: true });
-}, 30000);
+//
+// Rate care (issue #9): a burst of /api/pulls?live=1 calls trips Bitbucket's
+// 429 limiter, so the PR poll must not fire in lockstep across tabs or from
+// hidden/background tabs. We therefore jitter the delay (so open tabs drift
+// out of phase), skip the fetch while the tab is hidden, and debounce the
+// SSE-driven refreshes (below) so one review event ≠ one full refetch.
+const PULL_POLL_MS = 30000;
+const PULL_POLL_JITTER_MS = 5000;
+const SSE_REFRESH_DEBOUNCE_MS = 2000;
+let pullPollTimer = null;
+let pullRefreshTimer = null;
+
+function pollPullsTick() {
+  if (document.visibilityState !== "hidden") {
+    fetchPulls({ quiet: true });
+    if (state.mode === "stats") fetchStats({ quiet: true });
+  }
+  const jitter = Math.round(Math.random() * PULL_POLL_JITTER_MS);
+  pullPollTimer = setTimeout(pollPullsTick, PULL_POLL_MS + jitter);
+}
+
+// SSE-driven refreshes: one review finishing does not mean every PR changed,
+// so coalesce the flood of "job-ready"/"complete" events (several arrive per
+// review) into a single refresh shortly after — not one full live fetch per
+// event per open tab.
+function schedulePullRefresh(delayMs = SSE_REFRESH_DEBOUNCE_MS) {
+  if (document.visibilityState === "hidden") return;
+  if (pullRefreshTimer) return; // one refresh already queued
+  pullRefreshTimer = setTimeout(() => {
+    pullRefreshTimer = null;
+    fetchPulls({ quiet: true });
+  }, delayMs);
+}
+
+// Returning to a tab catches up immediately instead of waiting for the next
+// poll tick (the hidden tab skipped its fetches while away).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    fetchPulls({ quiet: true });
+    fetchJobs();
+  }
+});
+
+pollPullsTick();
 
 // ---- mode toggle / app filter / refresh ------------------------------------
 

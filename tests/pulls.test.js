@@ -178,6 +178,42 @@ test("live head is cached within TTL and cleared by clearPullCache()", async () 
   assert.equal(client.calls.head.length, 2, "clearPullCache forces refetch");
 });
 
+test("concurrent listPulls share one in-flight Bitbucket fetch per PR (coalescing)", async () => {
+  clearPullCache();
+  const cfg = freshCfg();
+  const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5620 };
+  makeJobDir(cfg.dirs.jobs, "ACME-acme-app-PR5620-aaa11111", {
+    ref,
+    reviewedSha: "aaa11111",
+    startedAt: "2026-10-20T09:00:00.000Z",
+    title: "PR #5620",
+  });
+  // Slow the client so BOTH callers are in flight simultaneously — exactly the
+  // "multiple tabs hit /api/pulls at the same moment" case from issue #9.
+  const client = fakeClient({
+    heads: { "ACME/acme-app#5620": "zzz99999" },
+    prCommits: { "ACME/acme-app#5620": ["zzz99999", "aaa11111"] },
+  });
+  const slowClient = {
+    ...client,
+    async getPullRequestRefs(ref) {
+      await new Promise((r) => setTimeout(r, 50));
+      return client.getPullRequestRefs(ref);
+    },
+  };
+
+  const [a, b] = await Promise.all([
+    listPulls(cfg, { client: slowClient, live: true, ttlMs: 600_000 }),
+    listPulls(cfg, { client: slowClient, live: true, ttlMs: 600_000 }),
+  ]);
+  assert.equal(client.calls.head.length, 1, "same PR fetched once despite two concurrent callers");
+  assert.equal(client.calls.commits.length, 1);
+  assert.equal(a.pulls[0].headSha, "zzz99999");
+  assert.equal(b.pulls[0].headSha, "zzz99999");
+  assert.equal(a.pulls[0].stale, true);
+  assert.equal(b.pulls[0].stale, true);
+});
+
 test("head lookups that fail do not break the pull list; up-to-date PRs are not stale", async () => {
   clearPullCache();
   const cfg = freshCfg();
