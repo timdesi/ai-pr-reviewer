@@ -774,6 +774,88 @@ export function listJobs(config) {
   return entries.map((name) => readJobSummary(config, name));
 }
 
+/**
+ * Paginated + slim job list for the dashboard (GET /api/jobs). Newest first.
+ * Reads only `limit` job summaries and returns lightweight records (no large
+ * streaming/consensus text), so a large job store can never stall the event
+ * loop by serializing a multi-MB payload (issue #6). Also returns the total job
+ * count so the UI can page without knowing the cap.
+ */
+export function listJobsPage(config, { limit = 50, offset = 0 } = {}) {
+  const jobsDir = config.dirs.jobs;
+  if (!existsSync(jobsDir)) return { jobs: [], total: 0, limit, offset };
+  const names = readdirSync(jobsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((name) => !name.startsWith("."))
+    .sort((a, b) => {
+      const ta = statTime(jobsDir, a);
+      const tb = statTime(jobsDir, b);
+      return tb - ta;
+    });
+  const total = names.length;
+  const page = names.slice(offset, limit > 0 ? offset + limit : undefined);
+  const jobs = page.map((name) => readJobSummary(config, name, { slim: true }));
+  return { jobs, total, limit, offset };
+}
+
+// Pipeline stages that mean a review is in flight. On boot any job stuck in one
+// of these is orphaned — the previous process died without finalizing it (a mid
+// review pod restart, issue #6). We mark it failed so the dashboard doesn't show
+// a permanent "running" job and re-reviews aren't blocked.
+export const RUNNING_STAGES = new Set(["fetch", "review", "consensus", "render", "publish"]);
+
+/**
+ * Boot-time sweep: mark jobs left in a running stage as failed. Returns the
+ * number of jobs finalized. Called once on server startup — no review is running
+ * in this process yet, so every "running" job on disk is stale by definition.
+ */
+export function finalizeStaleJobs(config) {
+  const jobsDir = config.dirs.jobs;
+  if (!existsSync(jobsDir)) return 0;
+  let finalized = 0;
+  let entries = [];
+  try {
+    entries = readdirSync(jobsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .filter((name) => !name.startsWith("."));
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const file = path.join(jobsDir, name, "status.json");
+    if (!existsSync(file)) continue;
+    let status = null;
+    try {
+      status = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue; // unreadable/corrupt status — leave it alone
+    }
+    if (!status || !RUNNING_STAGES.has(status.stage)) continue;
+
+    const wasStage = status.stage;
+    status.stage = "failed";
+    status.error =
+      status.error || "Review aborted: the process restarted mid-run and never finished (startup sweep).";
+    if (!status.completedAt) status.completedAt = new Date().toISOString();
+    for (const [key, agent] of Object.entries(status.agents || {})) {
+      if (agent && ["running", "pending"].includes(agent.status)) {
+        agent.status = "failed";
+        agent.error = agent.error || "aborted by process restart (startup sweep)";
+      }
+    }
+    try {
+      writeFileSync(file, JSON.stringify(status, null, 2));
+      finalized += 1;
+      log.warn(`startup sweep: marked stale job ${name} (was stage ${wasStage}) as failed`);
+    } catch (err) {
+      log.warn(`startup sweep: could not finalize ${name}: ${err.message}`);
+    }
+  }
+  return finalized;
+}
+
 function statTime(jobsDir, name) {
   try {
     return new Date(readFileJson(path.join(jobsDir, name, "job-meta.json"))?.startedAt || 0).getTime();
@@ -782,10 +864,57 @@ function statTime(jobsDir, name) {
   }
 }
 
-export function readJobSummary(config, jobName) {
+export function readJobSummary(config, jobName, { slim = false } = {}) {
   const jobDir = path.join(config.dirs.jobs, jobName);
   const meta = readFileJson(path.join(jobDir, "job-meta.json")) || {};
   const status = readFileJson(path.join(jobDir, "status.json")) || {};
+
+  // Slim summaries (dashboard list mode) drop the heavy streaming/findings text
+  // so a large job store never builds a multi-MB JSON payload that stalls the
+  // single-threaded event loop (issue #6). The list view only needs the fields
+  // it keeps; the full detail (agents/consensus text) is served by
+  // `/api/jobs/:name`.
+  if (slim) {
+    const agents = {};
+    for (const k of ["a", "b", "c", "d", "consensus"]) {
+      const a = status?.agents?.[k];
+      if (!a) continue;
+      agents[k] = {
+        key: a.key ?? k,
+        label: a.label ?? k,
+        model: a.model ?? null,
+        status: a.status ?? "unknown",
+        findings:
+          a.findings ?? (Array.isArray(a?.report?.findings) ? a.report.findings.length : null) ?? null,
+        error: a.error ?? null,
+        attempts: Array.isArray(a.attempts) ? a.attempts.length : 0,
+      };
+    }
+    return {
+      job: jobName,
+      dir: jobDir,
+      ref: meta.ref || status.ref || null,
+      title: meta.title || status.title || jobName,
+      reviewedSha: meta.reviewedSha || status.reviewedSha || fromReportHead(jobDir) || null,
+      startedAt: meta.startedAt || status.startedAt || null,
+      completedAt: status.completedAt || null,
+      stage: status.stage || "unknown",
+      error: status.error || null,
+      agents,
+      consensus: status.consensus
+        ? { findings: Array.isArray(status.consensus.findings) ? status.consensus.findings.length : null }
+        : null,
+      degraded: status.degraded || null,
+      publish: status.publish || null,
+      jiraAc: status.jiraAc || null,
+      vision: status.vision || null,
+      paths: {
+        jobDir,
+        finalReport: existsSync(path.join(jobDir, "final-report.md")) ? path.join(jobDir, "final-report.md") : (status.paths?.finalReport || null),
+        commentDraft: existsSync(path.join(jobDir, "comment-draft.md")) ? path.join(jobDir, "comment-draft.md") : (status.paths?.commentDraft || null),
+      },
+    };
+  }
 
   // Fallback for jobs created by the CLI before status.json existed:
   // reconstruct the summary from on-disk artifacts.
