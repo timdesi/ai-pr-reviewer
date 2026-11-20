@@ -178,3 +178,38 @@ test("workspace disk maintenance: LRU eviction frees space but keeps the active 
   assert.ok(existsSync(res.bare), "active bare repo NOT evicted");
   assert.ok(existsSync(res.dir), "active worktree NOT evicted");
 });
+
+test("eviction removes only the evicted repo's worktree: name-prefix sibling survives (PR #12 HIGH)", async () => {
+  // Two repos in the same workspace where one slug is a prefix of the other —
+  // the exact shape prefix-based eviction got wrong (sibling repos such as
+  // `planning` vs `planning-gateway`, which both live in production). Evicting
+  // `acme-app` must not remove `acme-app-toolkit`'s worktree, or its bare.
+  const shortRemote = makeRemote();
+  const longRemote = makeRemote();
+  const config = baseConfig({ dirs: { workspaceRoot: tempDir() } });
+  const refShort = { projectKey: "ACME", repoSlug: "acme-app", prId: 1 };
+  const refLong = { projectKey: "ACME", repoSlug: "acme-app-toolkit", prId: 2 };
+
+  const rShort = await prepareCheckout({ config, ref: refShort, sha: shortRemote.sha1, branch: "main", origin: shortRemote.remote });
+  const rLong = await prepareCheckout({ config, ref: refLong, sha: longRemote.sha1, branch: "main", origin: longRemote.remote });
+  assert.equal(rShort.ok, true, rShort.reason);
+  assert.equal(rLong.ok, true, rLong.reason);
+  assert.ok(existsSync(rShort.dir), "short repo worktree present before eviction");
+  assert.ok(existsSync(rLong.dir), "long (prefix-extension) repo worktree present before eviction");
+
+  // Age the short repo so LRU evicts it first; keepBare protects the long one.
+  const { utimesSync } = await import("node:fs");
+  const past = new Date(Date.now() - 600_000);
+  utimesSync(rShort.bare, past, past);
+
+  const freed = await evictWorkspace({
+    workspaceRoot: config.dirs.workspaceRoot,
+    workspaceMaxBytes: 1,
+    keepBare: rLong.bare,
+  });
+  assert.ok(freed > 0, "eviction freed bytes");
+  assert.ok(!existsSync(rShort.bare), "evicted repo's bare removed");
+  assert.ok(!existsSync(rShort.dir), "evicted repo's own worktree removed");
+  assert.ok(existsSync(rLong.bare), "prefix-extension sibling's bare NOT evicted");
+  assert.ok(existsSync(rLong.dir), "prefix-extension sibling's worktree NOT evicted");
+});

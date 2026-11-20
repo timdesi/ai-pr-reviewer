@@ -19,7 +19,7 @@
 // `CHECKOUT_KEEP` newest per repo after each review (git worktree prune), so a
 // large repository cannot fill the 2 GiB volume.
 
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -309,6 +309,14 @@ async function pruneWorktrees({ workspaceRoot, ref, keep = 3 }) {
 // any fetch. All best-effort — a failure only means less caching, never a
 // broken review (they degrade to "no checkout" like the rest of this module).
 
+// A full recursive `du` of the workspace on *every* checkout is wasteful while
+// nothing is over budget (AI review, PR #12 minor). The byte-budget eviction is
+// therefore re-checked at most once per interval on the normal post-checkout
+// path; the cheap `statfs` free-space guard and the on-demand ENOSPC/low-space
+// reclaim still react immediately when the volume is actually tight.
+const EVICTION_CHECK_INTERVAL_MS = 60_000;
+let lastEvictionCheckAt = 0;
+
 /** Number of `.pack` files in a bare repo's object store (0 when absent). */
 export function packCount(bare) {
   try {
@@ -363,21 +371,107 @@ async function freeBytes(dir) {
   }
 }
 
-/** Remove every worktree dir that belongs to `bareName` (prefix match). */
-function removeRepoWorktrees(workspaceRoot, bareName) {
-  const prefix = `${bareName.slice(0, -".git".length)}-`;
-  for (const e of readdirSync(workspaceRoot, { withFileTypes: true })) {
-    if (e.isDirectory() && e.name.startsWith(prefix)) {
-      rmSync(path.join(workspaceRoot, e.name), { recursive: true, force: true });
+/**
+ * Remove a bare repo together with *exactly* the worktrees git registers to it,
+ * returning the bytes freed (bare + worktrees, measured before removal).
+ *
+ * Worktree membership comes from `git --git-dir <bare> worktree list
+ * --porcelain` — the authoritative registry, exactly as `pruneWorktrees` uses —
+ * never from a name prefix. A bare `<repo>-` prefix collides between sibling
+ * repos whose slugs extend each other (e.g. `planning` vs `planning-gateway`,
+ * sibling repos that both exist in production): prefix-matching
+ * would delete the sibling's worktrees — including possibly the active review's
+ * checkout — while leaving them registered in the sibling's `worktrees/`
+ * metadata so its next `git worktree add` fails (AI review, PR #12).
+ *
+ * Must be called while the bare dir still exists so git can answer. Only when
+ * git reports no worktrees (bare already gone) do we fall back to matching the
+ * unambiguous `<repo>-<8 hex sha>` name shape — never a bare prefix.
+ */
+async function removeBareAndWorktrees(workspaceRoot, bareName) {
+  const bare = path.join(workspaceRoot, bareName);
+  const handle = bareName.slice(0, -".git".length);
+
+  // git reports real paths (e.g. /private/var/… where os.tmpdir() said
+  // /var/…), so compare realpaths — a bare path.startsWith check would wrongly
+  // reject on macOS's /var → /private/var alias.
+  let rootReal = path.resolve(workspaceRoot);
+  try {
+    rootReal = realpathSync(workspaceRoot);
+  } catch {
+    /* root missing — nothing to remove below anyway */
+  }
+  let bareReal = path.resolve(bare);
+  try {
+    bareReal = realpathSync(bare);
+  } catch {
+    /* bare already gone */
+  }
+
+  const targets = [];
+  try {
+    const r = await git(["--git-dir", bare, "worktree", "list", "--porcelain"]);
+    for (const block of String(r.stdout).split("\n\n")) {
+      const dir = block.match(/^worktree (.*)$/m)?.[1];
+      if (!dir) continue;
+      let dirReal = path.resolve(dir);
+      try {
+        dirReal = realpathSync(dir);
+      } catch {
+        /* stale registry entry → keep the raw path */
+      }
+      // `worktree list` on a bare repo also emits the bare dir itself — skip it.
+      if (dirReal !== bareReal) targets.push(dir);
+    }
+  } catch {
+    /* git unavailable → fall back to exact-name matching below */
+  }
+
+  if (targets.length === 0) {
+    const prefix = `${handle}-`;
+    for (const e of readdirSync(workspaceRoot, { withFileTypes: true })) {
+      if (e.isDirectory() && e.name.startsWith(prefix) && /^[0-9a-f]{8}$/.test(e.name.slice(prefix.length))) {
+        targets.push(path.join(workspaceRoot, e.name));
+      }
     }
   }
+
+  let bytes = 0;
+  for (const dir of targets) {
+    // Never touch anything outside the workspace, even if the worktree registry
+    // is corrupted. Measure before removal so worktree bytes count toward the
+    // eviction `freed` accounting (they are not part of the bare repo's du).
+    let dirReal = path.resolve(dir);
+    try {
+      dirReal = realpathSync(dir);
+    } catch {
+      continue; // already gone / unreadable — nothing to measure or remove
+    }
+    const rel = path.relative(rootReal, dirReal);
+    if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    bytes += await duBytes(dir);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+  bytes += await duBytes(bare);
+  try {
+    rmSync(bare, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
+  }
+  return bytes;
 }
 
 /**
  * Keep WORKSPACE_ROOT under `workspaceMaxBytes`: when the total exceeds the
- * budget, evict the least-recently-used bare repos (oldest first, never the
- * one active in this checkout) together with their worktrees. Bare repos are
- * only a warm cache — the next review re-fetches them. Returns bytes freed.
+ * budget, evict the least-recently-used bare repos (oldest first) with exactly
+ * their own worktrees. The currently-active repo (`keepBare`) and any repo with
+ * a live checkout lock (mid-fetch/mid-checkout by a concurrent review) are never
+ * evicted. Bare repos are only a warm cache — the next review re-fetches them.
+ * Returns bytes freed (bare + worktrees).
  */
 export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, keepBare = null }) {
   if (!existsSync(workspaceRoot) || !workspaceMaxBytes) return 0;
@@ -387,17 +481,22 @@ export async function evictWorkspace({ workspaceRoot, workspaceMaxBytes = 0, kee
   const repos = readdirSync(workspaceRoot, { withFileTypes: true })
     .filter((e) => e.isDirectory() && e.name.endsWith(".git"))
     .map((e) => ({ name: e.name, dir: path.join(workspaceRoot, e.name) }))
-    .filter((r) => r.dir !== keepBare)
+    .filter((r) => {
+      if (r.dir === keepBare) return false;
+      // A held checkout lock means another review is mid-checkout on this repo —
+      // never evict an object store that is actively being fetched into (AI
+      // review, PR #12 minor).
+      const handle = r.name.slice(0, -".git".length);
+      return !existsSync(path.join(workspaceRoot, `.lock-${handle}`));
+    })
     .sort((a, b) => statSync(a.dir).mtimeMs - statSync(b.dir).mtimeMs); // oldest first
 
   let freed = 0;
   for (const repo of repos) {
     if (total - freed <= workspaceMaxBytes) break;
-    const size = await duBytes(repo.dir);
-    rmSync(repo.dir, { recursive: true, force: true });
-    removeRepoWorktrees(workspaceRoot, repo.name);
+    const size = await removeBareAndWorktrees(workspaceRoot, repo.name);
     freed += size;
-    log.warn(`workspace: evicted LRU bare repo ${repo.name} (workspace ${total} > ${workspaceMaxBytes} budget)`);
+    log.warn(`workspace: evicted LRU bare repo ${repo.name} (workspace ${total} > ${workspaceMaxBytes} budget, freed ${size} bytes)`);
   }
   return freed;
 }
@@ -478,12 +577,19 @@ export async function prepareCheckout({ config, ref, sha, branch, origin }) {
       await pruneWorktrees({ workspaceRoot, ref, keep: config.checkout.keep });
       // Disk maintenance (issue #11): consolidate this repo's packs before they
       // accumulate, and evict LRU repos if the workspace grew past its budget.
+      // The LRU eviction's full-workspace `du` is throttled (once per interval)
+      // — the statfs free-space guard above and the ENOSPC reclaim still react
+      // immediately when the volume is tight.
       await maintainBare(bare, { packs: config.checkout.gcPacks ?? 20 });
-      await evictWorkspace({
-        workspaceRoot,
-        workspaceMaxBytes: config.checkout.workspaceMaxBytes ?? 0,
-        keepBare: bare,
-      });
+      const nowEvict = Date.now();
+      if (nowEvict - lastEvictionCheckAt >= EVICTION_CHECK_INTERVAL_MS) {
+        lastEvictionCheckAt = nowEvict;
+        await evictWorkspace({
+          workspaceRoot,
+          workspaceMaxBytes: config.checkout.workspaceMaxBytes ?? 0,
+          keepBare: bare,
+        });
+      }
       return { ok: true, dir: wt, bare, sha };
     });
   } catch (err) {
