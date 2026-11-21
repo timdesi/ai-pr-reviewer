@@ -271,9 +271,40 @@ Copy `dev/.env.example` to `dev/.env` and adjust. Key settings:
 | `JOBS_DIR` | Where job artifacts are written |
 | `HOST` / `PORT` | Dashboard bind address / port (default `127.0.0.1:8123`) |
 | `FETCH_PR_DISCUSSION` / `FETCH_PR_IMAGES` | Attach recent PR discussion / transcribed screenshots to the review |
+| `VISION_MODEL` + `VISION_*` routing knobs | Vision transcription model and routing (see §6.2) |
 
 The `REVIEWER_MODEL_*` values are OpenCode provider/model IDs; you can also
 switch models per slot from the dashboard UI (persisted overrides).
+
+### 6.2 Vision transcription routing and env overrides
+
+Screenshot transcription has **no baked-in default**: `VISION_MODEL` is unset
+by default and the step is skipped until you set it to an image-capable model.
+Routing is fully environment-driven — a deployment never edits source to change
+a model, a gateway, or the auth token. The minimal env set a deployment must
+supply to run the identical image from unmodified `src/`:
+
+``` env
+VISION_MODEL=prov-gateway/mdl-gw          # <provider>/<model>, image-capable
+VISION_GATEWAY_BASE_URL=https://gw.internal.example   # shared gateway (no trailing slash)
+VISION_API_VERSION=2026-05-01-preview     # optional api-version query param
+VISION_OPENAI_PROVIDERS=prov-gateway      # shared-gateway OpenAI-compatible providers
+VISION_ANTHROPIC_PROVIDERS=prov-msg       # Anthropic-Messages over :rawPredict providers
+VISION_BASEURL_PROVIDERS=prov-hosted      # per-model base-URL (opencode config map) providers
+VISION_TOKEN_ENV_VARS=GATEWAY_TOKEN_VAR   # ordered candidate token env-var NAMES; first non-empty wins
+```
+
+The three `VISION_*_PROVIDERS` lists are provider *classes* — they decide each
+provider's API shape and endpoint. A provider should appear in exactly one
+list. The same env supplied to the pack reproduces the same models, auth, and
+proxy behaviour as the local run; for the exact public placeholder values see
+`.env.example`.
+
+**One config delta a deployment must adopt:** the transcriber's auth token now
+comes **only** from `VISION_TOKEN_ENV_VARS` — it no longer reads the hard-coded
+`ANTHROPIC_AUTH_TOKEN` directly. A pack that relied on the old name sets that
+knob once (config-only; no source edit), e.g. `VISION_TOKEN_ENV_VARS=ANTHROPIC_AUTH_TOKEN`
+or the deployment's own internal token var name.
 
 ### 6.1 Webhook setup (server)
 

@@ -27,7 +27,7 @@ function makeJobDir(jobsDir, name, { ref, startedAt, stage = "complete", publish
         b: { status: "ok", cost: costs.b || null },
         consensus: { status: "ok", cost: costs.consensus || null },
       },
-      vision: costs.vision ? { model: "llmgw-gpt/gpt-6-luna", cost: costs.vision } : null,
+      vision: costs.vision ? { model: "prov-gateway/mdl-gw", cost: costs.vision } : null,
       consensus: stage === "complete" ? { findings: [{ severity: "LOW", title: "f" }] } : null,
       publish: published ? { published: true, commentId: 1 } : { published: false },
     }),

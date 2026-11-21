@@ -498,12 +498,27 @@ WORKSPACE_ROOT=/work
 MAX_CONCURRENT_REVIEWS=2
 REVIEWER_TIMEOUT_SECONDS=
 CONSENSUS_TIMEOUT_SECONDS=
-MAX_RETRIES=
+AGENT_MAX_RETRIES=
+REVIEWER_MODEL_A=
+CONSENSUS_MODEL=
+# Vision transcription routing (env-driven; empty = transcription disabled).
+VISION_MODEL=
+VISION_GATEWAY_BASE_URL=
+VISION_API_VERSION=
+VISION_OPENAI_PROVIDERS=
+VISION_ANTHROPIC_PROVIDERS=
+VISION_BASEURL_PROVIDERS=
+VISION_TOKEN_ENV_VARS=
 ```
 
 Use the organization's secret mechanism rather than storing secret
 values in a checked-in `.env` file. Configure OpenCode model IDs and
 provider credentials according to the deployed OpenCode version.
+
+**Zero-divergence rule:** code is never edited in a pack — deployment
+differences are env + build-config only. `src/` carries no provider name, token
+env-var name, or gateway URL; a pack built from unmodified `src/` behaves
+identically under the same environment.
 
 ## 14. Implementation plan
 

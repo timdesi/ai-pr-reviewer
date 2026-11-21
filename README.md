@@ -186,6 +186,24 @@ your own, or point the IDs at providers you already have configured.
 - The consensus model reads roughly 60 KB of reviewer reports, so pick one that
   handles long context well.
 
+Vision transcription routing is fully environment-driven — no provider name or
+deployment identity lives in `src/`:
+
+- `VISION_MODEL` (unset/empty by default — transcription is off until set) picks
+  the vision `provider/model`.
+- `VISION_OPENAI_PROVIDERS`, `VISION_ANTHROPIC_PROVIDERS`,
+  `VISION_BASEURL_PROVIDERS` classify each provider into its route class
+  (shared-gateway OpenAI-compatible, Anthropic-Messages over `:rawPredict`, or
+  per-model base-URL OpenAI-compatible).
+- `VISION_GATEWAY_BASE_URL` and `VISION_API_VERSION` drive the shared gateway's
+  URL and query param.
+- `VISION_TOKEN_ENV_VARS` names the ordered candidate env-var names for the
+  transcription auth token (first non-empty wins); the transcriber never reads
+  `process.env` itself.
+
+See `.env.example` and the env-override guide in
+`docs/ai-pr-reviewer-usage-guide.md` for a complete local/demo setup.
+
 ## How it works
 
 Every review runs through the same pipeline, whether it was triggered from the
@@ -282,6 +300,35 @@ start-up the entrypoint renders the OpenCode config from
 Point it at your own Bitbucket/GitHub, model gateway, and container registry.
 Remember to replace the template's placeholder gateway host before building for
 real use.
+
+### Zero-divergence rule
+
+**Code is never edited in a pack; deployment differences are env + build-config
+only.** Application source (`src/`) carries no provider name, token env-var
+name, or gateway URL — every deployment-specific value comes from environment
+variables and build-config (`docker/`, `.env.example`). A deployed pack that
+mirrors the public `src/` therefore behaves identically under the same env, and
+never needs a fork or a patch.
+
+### Syncing a deployment pack
+
+Copy-based, one command — no patch or merge step:
+
+```bash
+rsync --archive --delete <repo>/src/ <pack>/src/
+# optionally exclude pack-local files:
+# rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/
+```
+
+Then verify source parity (the diff must be empty):
+
+```bash
+git diff --no-index --stat <repo>/src <pack>/src
+```
+
+A non-empty diff means the pack has drifted — re-sync, don't merge. `package.json`,
+`tests/`, and `prompts/` are synced the same way when the pack mirrors them
+(`npm test` must stay green there too).
 
 ## Development
 

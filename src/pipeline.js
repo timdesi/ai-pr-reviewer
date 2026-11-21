@@ -344,6 +344,7 @@ export async function runReview({ ref, config, options = {} }) {
       description: pullRequest.description || "",
       activities: activities ?? [],
       baseUrls: visionBaseUrls,
+      vision: config.visionRouting,
     });
     prImagesBlock = prImages?.block || "";
     // The vision transcription is priced separately from the reviewers (its own

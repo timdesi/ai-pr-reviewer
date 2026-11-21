@@ -261,10 +261,11 @@ export function loadConfig({ envFile } = {}) {
       // non-fatal (see src/prImages.js). Unreadable images become a short
       // "screenshots not viewable — ask the author" note, never an error.
       fetchPrImages: bool("FETCH_PR_IMAGES", true),
-      // Vision model used for the transcription (OpenAI-compatible image input).
-      // Default: GPT-6 Luna on the LLM Gateway (azure deployments route). Swappable
-      // without a rebuild.
-      visionModel: str("VISION_MODEL", "llmgw-gpt/gpt-6-luna"),
+      // Vision model used for the transcription (`<provider>/<model>`). No
+      // baked-in default: unset/empty disables screenshot transcription. Which
+      // provider supplies it and how it is reached is decided by the env-driven
+      // `visionRouting` group below — never by a literal provider name here.
+      visionModel: str("VISION_MODEL"),
       // Safety caps for the image step: max images transcribed per review, max
       // bytes per download, and per-call timeouts.
       visionMaxImages: num("VISION_MAX_IMAGES", 6),
@@ -284,6 +285,35 @@ export function loadConfig({ envFile } = {}) {
       // like the Oracle Always-Free VM); N = at most N at a time.
       parallelism: int("REVIEWER_PARALLELISM", 0),
     },
+    // Vision transcription routing — fully environment-driven so the source
+    // carries zero deployment identities. Provider *classes* (not names)
+    // decide the API shape and endpoint:
+    //   providersOpenai    — shared-gateway OpenAI-compatible route
+    //   providersAnthropic — Anthropic-Messages shape over `:rawPredict`
+    //   providersBaseUrl   — per-model base-URL OpenAI-compatible route
+    // All defaults are empty; a deployment configures them via env. The auth
+    // token is resolved here, in `tokenEnvVars` order, so the transcriber
+    // never reads `process.env` itself.
+    visionRouting: (() => {
+      const tokenEnvVars = list("VISION_TOKEN_ENV_VARS");
+      let token = "";
+      for (const name of tokenEnvVars) {
+        const v = String(process.env[name] ?? "").trim();
+        if (v) {
+          token = v;
+          break;
+        }
+      }
+      return {
+        gatewayBaseUrl: str("VISION_GATEWAY_BASE_URL").replace(/\/+$/, ""),
+        apiVersion: str("VISION_API_VERSION"),
+        providersOpenai: list("VISION_OPENAI_PROVIDERS"),
+        providersAnthropic: list("VISION_ANTHROPIC_PROVIDERS"),
+        providersBaseUrl: list("VISION_BASEURL_PROVIDERS"),
+        tokenEnvVars,
+        token,
+      };
+    })(),
     checkout: {
       // Shallow-checkout the reviewed commit into WORKSPACE_ROOT so reviewers
       // can read the real tree (not just the diff). Best-effort/non-fatal.

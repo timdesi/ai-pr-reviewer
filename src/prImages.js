@@ -125,11 +125,19 @@ export async function loadScreenshotBlock({
   description = "",
   activities = [],
   baseUrls,
+  vision,
   transcribe = transcribeImage,
 }) {
   try {
     const { review } = config;
     if (!client || !review.fetchPrImages) return EMPTY_RESULT;
+    // With no vision model configured (empty VISION_MODEL) the step is skipped
+    // outright — no image downloads and no misleading "N screenshots could not
+    // be read" note on runs that never intended transcription.
+    if (!review.visionModel) {
+      log.info("vision: VISION_MODEL unset — skipping screenshot transcription");
+      return EMPTY_RESULT;
+    }
     const botUsernames = [config.bitbucket.username].filter(Boolean);
     const comments = flattenActivitiesToComments(activities);
     const items = collectImageRefs({ description, comments, botUsernames });
@@ -158,6 +166,7 @@ export async function loadScreenshotBlock({
         mimeType: downloaded.contentType || "image/png",
         timeoutMs: Number(review.visionCallTimeoutMs) || 60000,
         baseUrls,
+        vision,
       });
       // Accept both the structured `{ text, usage }` and a plain string caption.
       const caption = res ? (typeof res === "string" ? res : res.text) : null;
