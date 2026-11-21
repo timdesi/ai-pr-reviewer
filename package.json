@@ -1,12 +1,33 @@
 {
   "name": "ai-pr-reviewer",
-  "version": "0.5.2",
+  "version": "0.5.6",
   "private": true,
   "description": "On-demand AI pull-request reviewer for Bitbucket Data Center and GitHub",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
+  "files": [
+    ".env.example",
+    ".githooks/",
+    ".opencode/",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "Dockerfile",
+    "LICENSE",
+    "README.md",
+    "contexts/",
+    "docker/",
+    "docs/",
+    "leaflet/",
+    "package-lock.json",
+    "prompts/",
+    "run-ui.sh",
+    "scripts/",
+    "src/",
+    "tests/",
+    "ui/"
+  ],
   "scripts": {
     "review": "node --env-file-if-exists=.env src/cli.js review",
     "ui": "node --env-file-if-exists=.env src/server.js",

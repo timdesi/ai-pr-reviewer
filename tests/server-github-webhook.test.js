@@ -211,3 +211,48 @@ test("PUBLISH_TO_GITHUB=1 makes the posted review publish:true", async () => {
     assert.equal(records[0].publish, true, "PUBLISH_TO_GITHUB=1 → publish on");
   });
 });
+
+test("static UI app.js injects ui.modelOverrides over the __MODEL_OVERRIDES__ marker", async () => {
+  const overrides = { "acme-gpt/gpt-6-luna": "GPT-6 Luna", "acme-openai/deepseek-v4-pro": "DeepSeek V4 Pro" };
+  const config = baseConfig({ ui: { modelOverrides: overrides } });
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/javascript/);
+    const js = await res.text();
+    assert.ok(!js.includes("__MODEL_OVERRIDES__"), "marker must be substituted away");
+    assert.ok(js.includes('"acme-gpt/gpt-6-luna":"GPT-6 Luna"'), "override injected verbatim");
+    // Served file must still be a single valid assignment: marker + fallback {} are
+    // both replaced, leaving exactly one object literal.
+    assert.match(js, /const MODEL_OVERRIDES = \{"acme-gpt\/gpt-6-luna":"GPT-6 Luna","acme-openai\/deepseek-v4-pro":"DeepSeek V4 Pro"\};/);
+  });
+});
+
+test("static UI app.js serves the raw empty object when no modelOverrides configured", async () => {
+  const config = baseConfig(); // no ui.modelOverrides
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    const js = await res.text();
+    assert.match(js, /const MODEL_OVERRIDES = \{\};/, "empty overrides → empty object, file still valid");
+  });
+});
+
+test("static UI app.js: display names with $ sequences are injected verbatim, not interpreted", async () => {
+  // A `$` in a display name must not be treated as a $&/$1 replacement token
+  // by String.replace — the substituted dashboard would corrupt otherwise (AI
+  // review #18 minor). Use a replacer function and assert byte-fidelity.
+  const overrides = { "acme-gpt/gpt-6-luna": "GPT $LUNA & $& $1" };
+  const config = baseConfig({ ui: { modelOverrides: overrides } });
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    const js = await res.text();
+    assert.ok(js.includes('"acme-gpt/gpt-6-luna":"GPT $LUNA & $& $1"'), `dollar sequences survive: ${js.match(/const MODEL_OVERRIDES = [^;]+/)?.[0] ?? "no match"}`);
+    // And the served declaration must still parse as valid JS with the value intact.
+    const seg = js.slice(js.indexOf("const MODEL_OVERRIDES"), js.indexOf("function friendlyModel", js.indexOf("const MODEL_OVERRIDES")));
+    const val = new Function(`${seg}\nreturn JSON.stringify(MODEL_OVERRIDES);`)();
+    assert.equal(JSON.parse(val)["acme-gpt/gpt-6-luna"], "GPT $LUNA & $& $1");
+  });
+});
+
