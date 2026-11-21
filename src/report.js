@@ -64,6 +64,14 @@ function fmtLines(f) {
   return ` L${f.line_start ?? f.line_end}`;
 }
 
+// Renders the finding location as ONE inline-code span, e.g. `src/foo.ts L209-245`.
+// The file and the line token share the backticks on purpose: Bitbucket DC
+// auto-links Jira-issue-key-shaped tokens, so a bare ` L209-245` outside inline
+// code becomes a broken link to its jira-integration servlet (404).
+function fmtLocation(f) {
+  return `\`${f?.file ?? "(unknown file)"}${fmtLines(f ?? {})}\``;
+}
+
 function countsBySeverity(findings) {
   const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
   for (const f of findings ?? []) {
@@ -198,7 +206,7 @@ function pushFinding(lines, idx, f, internal = false) {
   const icon = SEVERITY_ICON[f?.severity] ?? "•";
   lines.push(`#### ${idx + 1}. ${icon} ${f?.severity ?? "LOW"} — ${f?.title ?? "(untitled)"}`);
   lines.push("");
-  const loc = `**\`${f?.file ?? "(unknown file)"}\`**` + fmtLines(f ?? {});
+  const loc = `**${fmtLocation(f)}**`;
   const conf = typeof f?.confidence === "number" ? ` · confidence ${f.confidence.toFixed(2)}` : "";
   const cat = internal && f?.category ? ` · ${f.category}` : "";
   lines.push(loc + conf + cat + (internal ? groundingNote(f) : ""));
@@ -266,7 +274,7 @@ function pushMinor(lines, findings) {
   for (const f of sorted) {
     const icon = SEVERITY_ICON[f?.severity] ?? "•";
     const conf = typeof f?.confidence === "number" ? ` (confidence ${f.confidence.toFixed(2)})` : "";
-    lines.push(`- ${icon} ${f?.title ?? "(untitled)"} — \`${f?.file ?? "(unknown file)"}\`${fmtLines(f ?? {})}${conf}`);
+    lines.push(`- ${icon} ${f?.title ?? "(untitled)"} — ${fmtLocation(f)}${conf}`);
   }
   lines.push("");
 }

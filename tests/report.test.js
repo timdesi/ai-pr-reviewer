@@ -23,6 +23,13 @@ const finding = {
   suggested_fix: "1. Add the branch after the field filters\n2. Cover it with a test",
 };
 
+// Returns the rendered text with every inline-code span removed, so tests can
+// assert that Jira-issue-key-shaped tokens (e.g. L46-73) never appear as plain
+// text — Bitbucket DC auto-links such tokens to a servlet that 404s.
+function outsideCode(md) {
+  return md.replace(/`[^`]*`/g, "");
+}
+
 const report = {
   schema_version: "1.0",
   reviewed_sha: "ff34c305deadbeef1234abcd",
@@ -62,6 +69,50 @@ test("finding uses blockquote impact, numbered fix and diff evidence", () => {
   assert.match(md, /> \*\*Impact:\*\*/);
   assert.match(md, /\*\*Suggested fix:\*\*\n\n1\. Add the branch after the field filters/);
   assert.ok(md.includes("```diff\n- builder never reads criteria.getDistinct()"));
+});
+
+test("finding location is one inline-code span: file and line range share the backticks", () => {
+  const md = renderComment({ report, ref, baseUrl });
+  // File + range wrap together, e.g. `app/.../DeviationCodeQueryService.java L46-73`,
+  // so Bitbucket DC never sees a bare `L46-73` token to Jira-smart-link to a 404.
+  assert.match(
+    md,
+    /`app\/src\/main\/java\/com\/example\/acme\/service\/query\/DeviationCodeQueryService\.java L46-73`/,
+  );
+  // The old shape — backticked file, then bare line text after the closing ** —
+  // must be gone: `...java`** L46-73
+  assert.doesNotMatch(md, /\.java`\*\* L46-73/);
+  // Nothing outside inline code may look like a line-number Jira key.
+  assert.doesNotMatch(outsideCode(md), /L\d+/);
+});
+
+test("single-line finding keeps its lone line number inside the code span", () => {
+  const md = renderComment({
+    report: { ...report, findings: [{ ...finding, line_start: 42, line_end: 42 }] },
+    ref,
+    baseUrl,
+  });
+  assert.match(
+    md,
+    /`app\/src\/main\/java\/com\/example\/acme\/service\/query\/DeviationCodeQueryService\.java L42`/,
+  );
+  assert.doesNotMatch(outsideCode(md), /L\d+/);
+});
+
+test("minor finding wraps file and line number in one code span too", () => {
+  // LOW severity under a MEDIUM gate lands in the compact minor list.
+  const md = renderComment({
+    report: { ...report, findings: [{ ...finding }] },
+    ref,
+    baseUrl,
+    policy: { minSeverity: "MEDIUM", minConfidence: 0 },
+  });
+  assert.match(md, /### Minor \(1\)/);
+  assert.match(
+    md,
+    /`app\/src\/main\/java\/com\/example\/acme\/service\/query\/DeviationCodeQueryService\.java L46-73`/,
+  );
+  assert.doesNotMatch(outsideCode(md), /L\d+/);
 });
 
 test("comment drops the internal notes and reviewer meta-talk", () => {
