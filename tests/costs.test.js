@@ -24,9 +24,9 @@ test("loadModelPrices builds provider/model map from cost metadata", () => {
           "discretestack-stable": {}, // no cost -> skipped
         },
       },
-      "llmgw-anthropic": {
+      "prov-msg": {
         models: {
-          "claude-haiku-5-5": { cost: { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 } },
+          "mdl-an": { cost: { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 } },
         },
       },
     },
@@ -38,7 +38,7 @@ test("loadModelPrices builds provider/model map from cost metadata", () => {
     cacheRead: 0.07,
     cacheWrite: 0.35,
   });
-  assert.deepEqual(prices["llmgw-anthropic/claude-haiku-5-5"], {
+  assert.deepEqual(prices["prov-msg/mdl-an"], {
     input: 0.1,
     output: 0.5,
     cacheRead: 0.01,
@@ -57,12 +57,12 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
           },
         },
       },
-      "llmgw-msp": {
+      "prov-hosted": {
         models: {
-          "glm-52": {
+          "mdl-h-52": {
             cost: { input: 0.418, output: 1.338, cache: { read: 0.078, write: 0.418 } },
           },
-          "glm-5": { modelID: "zai-org/glm-5", cost: { input: 0.5, output: 1.5 } },
+          "mdl-h-5": { modelID: "ext-org/mdl-h-5", cost: { input: 0.5, output: 1.5 } },
         },
       },
     },
@@ -74,14 +74,14 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
     cacheRead: 0.07,
     cacheWrite: 0.35,
   });
-  assert.deepEqual(prices["llmgw-msp/glm-52"], {
+  assert.deepEqual(prices["prov-hosted/mdl-h-52"], {
     input: 0.418,
     output: 1.338,
     cacheRead: 0.078,
     cacheWrite: 0.418,
   });
   // Keyed by the config key (not modelID) so it matches the pipeline's --model ref.
-  assert.deepEqual(prices["llmgw-msp/glm-5"], {
+  assert.deepEqual(prices["prov-hosted/mdl-h-5"], {
     input: 0.5,
     output: 1.5,
     cacheRead: 0,
@@ -95,16 +95,16 @@ test("loadModelPrices reads native V2 providers map + cache.read/write", () => {
 test("listAvailableModels enumerates provider/model ids (V2 + V1, both shapes)", () => {
   const file = tmpConfig({
     providers: {
-      llmgw: { models: { "claude-haiku-5-5": { name: "Claude Haiku 5.5" }, "claude-opus-5-5": {} } },
-      "llmgw-msp": { models: { "glm-52": { name: "GLM-5" }, "glm-5": { modelID: "zai-org/glm-5" } } },
+      "prov-msg": { models: { "mdl-an": { name: "Mdl An" }, "mdl-an-opus": {} } },
+      "prov-hosted": { models: { "mdl-h-52": { name: "Mdl H" }, "mdl-h-5": { modelID: "ext-org/mdl-h-5" } } },
     },
   });
   const models = listAvailableModels([file]);
   assert.deepEqual(models, [
-    { id: "llmgw-msp/glm-5", name: "glm-5", image: false }, // no explicit name -> key
-    { id: "llmgw-msp/glm-52", name: "GLM-5", image: false },
-    { id: "llmgw/claude-haiku-5-5", name: "Claude Haiku 5.5", image: false },
-    { id: "llmgw/claude-opus-5-5", name: "claude-opus-5-5", image: false },
+    { id: "prov-hosted/mdl-h-5", name: "mdl-h-5", image: false }, // no explicit name -> key
+    { id: "prov-hosted/mdl-h-52", name: "Mdl H", image: false },
+    { id: "prov-msg/mdl-an", name: "Mdl An", image: false },
+    { id: "prov-msg/mdl-an-opus", name: "mdl-an-opus", image: false },
   ]);
   // Legacy V1 shape + graceful fallback.
   const legacy = tmpConfig({ provider: { p: { models: { m: { cost: {} } } } } });
@@ -116,41 +116,41 @@ test("listAvailableModels enumerates provider/model ids (V2 + V1, both shapes)",
 test("listAvailableModels flags image input from capabilities", () => {
   const file = tmpConfig({
     providers: {
-      llmgw: {
+      "prov-msg": {
         models: {
-          "claude-haiku-5-5": { capabilities: { input: ["text", "image"], output: ["text"] } },
-          "claude-opus-5-5": { capabilities: { input: ["text"], output: ["text"] } },
-          "bare": {},
+          "mdl-an": { capabilities: { input: ["text", "image"], output: ["text"] } },
+          "mdl-an-opus": { capabilities: { input: ["text"], output: ["text"] } },
+          bare: {},
         },
       },
     },
   });
   const byId = Object.fromEntries(listAvailableModels([file]).map((m) => [m.id, m]));
-  assert.equal(byId["llmgw/claude-haiku-5-5"].image, true);
-  assert.equal(byId["llmgw/claude-opus-5-5"].image, false);
-  assert.equal(byId["llmgw/bare"].image, false, "no capabilities -> not image-capable");
+  assert.equal(byId["prov-msg/mdl-an"].image, true);
+  assert.equal(byId["prov-msg/mdl-an-opus"].image, false);
+  assert.equal(byId["prov-msg/bare"].image, false, "no capabilities -> not image-capable");
 });
 
 test("loadModelBaseUrls: provider-level base URL, per-model overrides", () => {
   const file = tmpConfig({
     providers: {
-      "llmgw-msp": {
-        settings: { baseURL: "https://farm/msp/glm-5.2/v1" },
+      "prov-hosted": {
+        settings: { baseURL: "https://farm/h/5.2/v1" },
         models: {
-          "glm-52": {},
-          "Qwen-27B": { settings: { baseURL: "https://farm/msp/qwen-27b/v1" } },
+          "mdl-h-52": {},
+          "mdl-h-27": { settings: { baseURL: "https://farm/h/27/v1" } },
         },
       },
-      "llmgw-openai": {
+      "prov-gateway": {
         settings: { baseURL: "https://farm/api/openai" },
-        models: { "deepseek-v4-pro": {} },
+        models: { "mdl-text": {} },
       },
     },
   });
   assert.deepEqual(loadModelBaseUrls([file]), {
-    "llmgw-msp/glm-52": "https://farm/msp/glm-5.2/v1",
-    "llmgw-msp/Qwen-27B": "https://farm/msp/qwen-27b/v1",
-    "llmgw-openai/deepseek-v4-pro": "https://farm/api/openai",
+    "prov-hosted/mdl-h-52": "https://farm/h/5.2/v1",
+    "prov-hosted/mdl-h-27": "https://farm/h/27/v1",
+    "prov-gateway/mdl-text": "https://farm/api/openai",
   });
   assert.deepEqual(loadModelBaseUrls(["/nonexistent/config.json"]), {});
   assert.deepEqual(loadModelBaseUrls([tmpConfig({ providers: { p: { models: { m: {} } } } })]), {}); // no baseURL anywhere

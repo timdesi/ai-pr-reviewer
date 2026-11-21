@@ -94,11 +94,110 @@ test("isTranslationReview matches when any path hits any pattern", () => {
 });
 
 test("loadConfig reads REVIEWER_MODEL_D and defaults translation patterns", () => {
-  withEnv({ REVIEWER_MODEL_D: "llmgw-openai/deepseek-v4-pro" }, () => {
+  withEnv({ REVIEWER_MODEL_D: "prov-gateway/mdl-d" }, () => {
     const config = loadConfig({ envFile: "/nonexistent/none.env" });
-    assert.equal(config.models.reviewerD, "llmgw-openai/deepseek-v4-pro");
+    assert.equal(config.models.reviewerD, "prov-gateway/mdl-d");
     assert.ok(config.review.translationPathPatterns.length >= 1);
   });
+});
+
+test("vision routing env knobs: parse, defaults are empty, token resolves in candidate order", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "cfg-vision-routing-"));
+  const settings = path.join(dir, ".models.json");
+  writeFileSync(settings, "{}");
+  try {
+    // A should-be-unset VISION_MODEL (and one explicitly "") both yield "".
+    withEnv({ MODEL_SETTINGS_FILE: settings, VISION_MODEL: "" }, () => {
+      const saved = process.env.VISION_MODEL;
+      delete process.env.VISION_MODEL;
+      try {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.equal(config.review.visionModel, "");
+      } finally {
+        if (saved === undefined) delete process.env.VISION_MODEL;
+        else process.env.VISION_MODEL = saved;
+      }
+      assert.equal(loadConfig({ envFile: "/nonexistent/none.env" }).review.visionModel, "");
+    });
+    // Every knob defaults to an empty value when unset.
+    withEnv(
+      {
+        MODEL_SETTINGS_FILE: settings,
+        VISION_GATEWAY_BASE_URL: "",
+        VISION_API_VERSION: "",
+        VISION_OPENAI_PROVIDERS: "",
+        VISION_ANTHROPIC_PROVIDERS: "",
+        VISION_BASEURL_PROVIDERS: "",
+        VISION_TOKEN_ENV_VARS: "",
+      },
+      () => {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.equal(config.visionRouting.gatewayBaseUrl, "");
+        assert.equal(config.visionRouting.apiVersion, "");
+        assert.deepEqual(config.visionRouting.providersOpenai, []);
+        assert.deepEqual(config.visionRouting.providersAnthropic, []);
+        assert.deepEqual(config.visionRouting.providersBaseUrl, []);
+        assert.deepEqual(config.visionRouting.tokenEnvVars, []);
+        assert.equal(config.visionRouting.token, "");
+      },
+    );
+    // Comma lists parse + trim; the gateway base URL loses its trailing slash.
+    withEnv(
+      {
+        MODEL_SETTINGS_FILE: settings,
+        VISION_OPENAI_PROVIDERS: "a,b",
+        VISION_ANTHROPIC_PROVIDERS: "x",
+        VISION_BASEURL_PROVIDERS: " y , z ",
+        VISION_GATEWAY_BASE_URL: "https://gw.example.test/",
+        VISION_API_VERSION: "2026-05-01-preview",
+      },
+      () => {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.deepEqual(config.visionRouting.providersOpenai, ["a", "b"]);
+        assert.deepEqual(config.visionRouting.providersAnthropic, ["x"]);
+        assert.deepEqual(config.visionRouting.providersBaseUrl, ["y", "z"]);
+        assert.equal(config.visionRouting.gatewayBaseUrl, "https://gw.example.test");
+        assert.equal(config.visionRouting.apiVersion, "2026-05-01-preview");
+      },
+    );
+    // Token: first candidate with a non-empty trimmed value wins.
+    withEnv(
+      {
+        MODEL_SETTINGS_FILE: settings,
+        VISION_TOKEN_ENV_VARS: "FIRST_TOK_VAR, SECOND_TOK_VAR",
+        FIRST_TOK_VAR: "first-value",
+        SECOND_TOK_VAR: "second-value",
+      },
+      () => {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.equal(config.visionRouting.token, "first-value");
+      },
+    );
+    withEnv(
+      {
+        MODEL_SETTINGS_FILE: settings,
+        VISION_TOKEN_ENV_VARS: "FIRST_TOK_VAR, SECOND_TOK_VAR",
+        FIRST_TOK_VAR: "   ",
+        SECOND_TOK_VAR: "second-value",
+      },
+      () => {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.equal(config.visionRouting.token, "second-value");
+      },
+    );
+    withEnv(
+      {
+        MODEL_SETTINGS_FILE: settings,
+        VISION_TOKEN_ENV_VARS: "FIRST_TOK_VAR, SECOND_TOK_VAR",
+      },
+      () => {
+        const config = loadConfig({ envFile: "/nonexistent/none.env" });
+        assert.equal(config.visionRouting.token, "");
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("loadConfig adds reviewer d from persisted model assignments", () => {

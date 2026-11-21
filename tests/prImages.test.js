@@ -8,7 +8,7 @@ const BOT = "mybot@example.com";
 const baseConfig = {
   review: {
     fetchPrImages: true,
-    visionModel: "llmgw-gpt/gpt-6-luna",
+    visionModel: "prov-gateway/mdl-gw",
     visionMaxImages: 6,
     visionMaxImageBytes: 10 * 1024 * 1024,
     visionFetchTimeoutMs: 5000,
@@ -17,6 +17,19 @@ const baseConfig = {
   bitbucket: { baseUrl: "https://bb.example.com", username: BOT },
 };
 const ref = { projectKey: "P", repoSlug: "r", prId: 7 };
+
+// Neutral routing fixture: provider *classes* (never names) drive the routes.
+const VISION = Object.freeze({
+  gatewayBaseUrl: "https://gw.example.test",
+  apiVersion: "2026-05-01-preview",
+  providersOpenai: ["prov-gateway"],
+  providersAnthropic: ["prov-msg"],
+  providersBaseUrl: ["prov-hosted"],
+  token: "tok",
+});
+const HOSTED_BASES = Object.freeze({
+  "prov-hosted/mdl-h": "https://gw.example.test/api/services/h/v1/",
+});
 
 // --- extractImageRefs --------------------------------------------------------
 
@@ -175,35 +188,63 @@ test("loadScreenshotBlock: oversized / non-image downloads are unreadable", asyn
 
 // --- vision routing ----------------------------------------------------------
 
-test("visionRoute maps llmgw-gpt to the Azure deployments route", () => {
-  const r = visionRoute("llmgw-gpt/gpt-6-luna");
+test("visionRoute maps the openai class provider to the shared-gateway chat/completions route", () => {
+  const r = visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: VISION });
   assert.ok(r);
-  assert.match(r.url, /\/api\/openai\/deployments\/gpt-6-luna\/chat\/completions\?api-version=2025-04-01-preview$/);
-  assert.equal(r.model, "gpt-6-luna");
+  assert.match(r.url, /\/api\/openai\/deployments\/mdl-gw\/chat\/completions\?api-version=2026-05-01-preview$/);
+  assert.equal(r.kind, "openai");
+  assert.equal(r.model, "mdl-gw");
 });
 
-test("visionRoute: bare id defaults to llmgw-gpt; llmgw/claude maps to the Anthropic route; others are null", () => {
-  assert.equal(visionRoute("gpt-6-luna").model, "gpt-6-luna");
-  const anthropic = visionRoute("llmgw/claude-haiku-5-5");
+test("visionRoute: bare id routes under the first configured openai provider; anthropic class → :rawPredict; unknown/empty → null", () => {
+  const bare = visionRoute("mdl-bare", { baseUrls: {}, vision: VISION });
+  assert.equal(bare.model, "mdl-bare");
+  assert.match(bare.url, /\/api\/openai\/deployments\/mdl-bare\/chat\/completions\?api-version=2026-05-01-preview$/);
+  const anthropic = visionRoute("prov-msg/mdl-an", { baseUrls: {}, vision: VISION });
   assert.ok(anthropic);
   assert.equal(anthropic.kind, "anthropic");
-  assert.equal(anthropic.model, "claude-haiku-5-5");
-  assert.match(anthropic.url, /\/api\/google\/v1\/publishers\/anthropic\/models\/claude-haiku-5-5:rawPredict$/);
-  assert.equal(visionRoute("acme/bogus-1"), null);
-  assert.equal(visionRoute(""), null);
+  assert.equal(anthropic.model, "mdl-an");
+  assert.match(anthropic.url, /\/api\/google\/v1\/publishers\/anthropic\/models\/mdl-an:rawPredict$/);
+  assert.equal(visionRoute("acme/bogus-1", { baseUrls: {}, vision: VISION }), null);
+  assert.equal(visionRoute("", { baseUrls: {}, vision: VISION }), null);
+  // Bare id with no configured openai provider is unroutable.
+  assert.equal(visionRoute("mdl-bare", { baseUrls: {}, vision: { ...VISION, providersOpenai: [] } }), null);
 });
 
-test("visionRoute: llmgw-msp uses the model's per-model base URL from the config", () => {
-  assert.equal(visionRoute("llmgw-msp/Qwen-27B"), null, "no base-URL map -> unroutable");
-  const bases = { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" };
-  const r = visionRoute("llmgw-msp/Qwen-27B", bases);
+test("visionRoute: baseurl class uses the per-model base URL from the config; no map → null", () => {
+  assert.equal(visionRoute("prov-hosted/mdl-h", { baseUrls: {}, vision: VISION }), null, "no base-URL map -> unroutable");
+  const r = visionRoute("prov-hosted/mdl-h", { baseUrls: HOSTED_BASES, vision: VISION });
   assert.ok(r);
   assert.equal(r.kind, "openai");
-  assert.equal(r.model, "Qwen-27B");
-  assert.equal(r.url, "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/chat/completions");
+  assert.equal(r.model, "mdl-h");
+  assert.equal(r.url, "https://gw.example.test/api/services/h/v1/chat/completions");
 });
 
-test("transcribeImage routes llmgw-msp to the per-model chat/completions endpoint", async () => {
+test("visionRoute: empty gateway base URL makes shared-gateway classes unroutable", () => {
+  const noGw = { ...VISION, gatewayBaseUrl: "" };
+  assert.equal(visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: noGw }), null);
+  assert.equal(visionRoute("prov-msg/mdl-an", { baseUrls: {}, vision: noGw }), null);
+});
+
+test("visionRoute: empty api-version omits the query param", () => {
+  const r = visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: { ...VISION, apiVersion: "" } });
+  assert.ok(r);
+  assert.equal(r.url, "https://gw.example.test/api/openai/deployments/mdl-gw/chat/completions");
+});
+
+test("visionRoute: token comes from the injected resolved value", () => {
+  const r = visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: { ...VISION, token: "injected-tok" } });
+  assert.ok(r);
+  assert.equal(r.token, "injected-tok");
+});
+
+test("visionRoute: unconfigured/empty vision routes null and never throws; transcribeImage without vision → null", async () => {
+  assert.equal(visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: {} }), null);
+  assert.equal(visionRoute("prov-gateway/mdl-gw", { baseUrls: {}, vision: undefined }), null);
+  assert.equal(await transcribeImage({ model: "prov-gateway/mdl-gw", imageBytes: Buffer.from("x") }), null);
+});
+
+test("transcribeImage routes the baseurl class to the per-model chat/completions endpoint", async () => {
   const seen = [];
   const orig = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -212,25 +253,24 @@ test("transcribeImage routes llmgw-msp to the per-model chat/completions endpoin
       ok: true,
       status: 200,
       text: async () =>
-        JSON.stringify({ choices: [{ message: { content: "qwen read it" } }], usage: { prompt_tokens: 9, completion_tokens: 3 } }),
+        JSON.stringify({ choices: [{ message: { content: "transcribed the screenshot" } }], usage: { prompt_tokens: 9, completion_tokens: 3 } }),
     };
   };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
     const out = await transcribeImage({
-      model: "llmgw-msp/Qwen-27B",
+      model: "prov-hosted/mdl-h",
       imageBytes: Buffer.from("png"),
       mimeType: "image/png",
-      baseUrls: { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" },
+      baseUrls: HOSTED_BASES,
+      vision: VISION,
     });
-    assert.equal(out.text, "qwen read it");
+    assert.equal(out.text, "transcribed the screenshot");
     assert.deepEqual(out.usage, { input: 9, output: 3 });
     assert.equal(seen.length, 1);
-    assert.match(seen[0].url, /qwen-27b\/v1\/chat\/completions$/);
+    assert.match(seen[0].url, /api\/services\/h\/v1\/chat\/completions$/);
     assert.ok(seen[0].hasImage);
   } finally {
     globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
 });
 
@@ -249,20 +289,18 @@ test("transcribeImage posts the image and returns { text, usage } parsed from th
         }),
     };
   };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("png"), mimeType: "image/png" });
+    const out = await transcribeImage({ model: "prov-gateway/mdl-gw", imageBytes: Buffer.from("png"), mimeType: "image/png", vision: VISION });
     assert.equal(out.text, "verified 5 rows");
     assert.deepEqual(out.usage, { input: 120, output: 40 });
     assert.equal(seen.length, 1);
     assert.ok(seen[0].hasImage && seen[0].hasB64);
   } finally {
     globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
 });
 
-test("transcribeImage speaks the Anthropic messages format over :rawPredict (llmgw/claude-*)", async () => {
+test("transcribeImage speaks the Anthropic messages format over :rawPredict", async () => {
   const seen = [];
   const orig = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -282,13 +320,12 @@ test("transcribeImage speaks the Anthropic messages format over :rawPredict (llm
         }),
     };
   };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "llmgw/claude-haiku-5-5", imageBytes: Buffer.from("png"), mimeType: "image/png" });
+    const out = await transcribeImage({ model: "prov-msg/mdl-an", imageBytes: Buffer.from("png"), mimeType: "image/png", vision: VISION });
     assert.equal(out.text, "screenshot shows the login form");
     assert.deepEqual(out.usage, { input: 150, output: 30 });
     assert.equal(seen.length, 1);
-    assert.match(seen[0].url, /claude-haiku-5-5:rawPredict$/);
+    assert.match(seen[0].url, /mdl-an:rawPredict$/);
     assert.equal(seen[0].body.anthropic_version, "vertex-2023-10-16");
     assert.equal(seen[0].body.max_tokens, 700);
     const image = seen[0].body.messages[0].content.find((c) => c.type === "image");
@@ -298,13 +335,12 @@ test("transcribeImage speaks the Anthropic messages format over :rawPredict (llm
     assert.equal(seen[0].sticky, "01");
   } finally {
     globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
 });
 
-test("transcribeImage returns null without a token, on route miss, or with no text (never throws)", async () => {
-  assert.equal(await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") }), null); // no token
-  assert.equal(await transcribeImage({ model: "acme/bogus-1", imageBytes: Buffer.from("x") }), null); // not routable
+test("transcribeImage returns null on no token, route miss, or no text (never throws)", async () => {
+  assert.equal(await transcribeImage({ model: "prov-gateway/mdl-gw", imageBytes: Buffer.from("x"), vision: { ...VISION, token: "" } }), null); // no token
+  assert.equal(await transcribeImage({ model: "acme/bogus-1", imageBytes: Buffer.from("x"), vision: VISION }), null); // not routable
   // Text-only response without usage -> { text, usage: null }.
   const orig = globalThis.fetch;
   globalThis.fetch = async () => ({
@@ -312,13 +348,61 @@ test("transcribeImage returns null without a token, on route miss, or with no te
     status: 200,
     text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
   });
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
   try {
-    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") });
+    const out = await transcribeImage({ model: "prov-gateway/mdl-gw", imageBytes: Buffer.from("x"), vision: VISION });
     assert.equal(out.text, "ok");
     assert.equal(out.usage, null);
   } finally {
     globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
+});
+
+test("loadScreenshotBlock: empty visionModel skips cleanly (no download, no transcribe, no unreadable note)", async () => {
+  let fetched = false;
+  let transcribed = false;
+  const client = {
+    fetchBuffer: async () => {
+      fetched = true;
+      return { bytes: Buffer.from("x"), contentType: "image/png" };
+    },
+  };
+  const res = await loadScreenshotBlock({
+    client,
+    config: { ...baseConfig, review: { ...baseConfig.review, visionModel: "" } },
+    ref,
+    description: "![a](attachment:1/2)",
+    activities: [],
+    transcribe: async () => {
+      transcribed = true;
+      throw new Error("must not be called when the vision model is unset");
+    },
+  });
+  assert.deepEqual(res, { block: "", usage: null, transcribed: 0, unreadable: 0 });
+  assert.equal(fetched, false, "no image download when the vision model is unset");
+  assert.equal(transcribed, false, "no transcription when the vision model is unset");
+});
+
+test("provider identity is data: the same class routes identically under arbitrary names", () => {
+  const aliasA = { ...VISION, providersOpenai: ["alpha"], providersBaseUrl: ["hosted-a"], token: "tok-a" };
+  const aliasB = { ...VISION, providersOpenai: ["zz-internal"], providersBaseUrl: ["hosted-z"], token: "tok-b" };
+  const a = visionRoute("alpha/mdl-x", { baseUrls: {}, vision: aliasA });
+  const b = visionRoute("zz-internal/mdl-x", { baseUrls: {}, vision: aliasB });
+  assert.ok(a && b);
+  assert.equal(a.kind, b.kind);
+  assert.equal(a.url, b.url);
+  assert.equal(a.model, b.model);
+  assert.equal(a.token, "tok-a", "token is the injected resolved value");
+  assert.equal(b.token, "tok-b", "token is the injected resolved value");
+  // The per-model base-URL class is alias-independent too: same kind, same
+  // model key, same `/chat/completions` shape (the base URLs themselves are
+  // data and may differ).
+  const ha = visionRoute("hosted-a/mdl-y", { baseUrls: { "hosted-a/mdl-y": "https://gw.example.test/api/h/a/v1/" }, vision: aliasA });
+  const hb = visionRoute("hosted-z/mdl-y", { baseUrls: { "hosted-z/mdl-y": "https://gw.example.test/api/h/z/v1/" }, vision: aliasB });
+  assert.ok(ha && hb);
+  assert.equal(ha.kind, "openai");
+  assert.equal(hb.kind, "openai");
+  assert.equal(ha.kind, hb.kind);
+  assert.equal(ha.model, hb.model);
+  assert.match(ha.url, /\/api\/h\/a\/v1\/chat\/completions$/);
+  assert.match(hb.url, /\/api\/h\/z\/v1\/chat\/completions$/);
 });
