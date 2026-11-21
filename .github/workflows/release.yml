@@ -99,8 +99,11 @@ jobs:
           rm -rf /tmp/release-scan && mkdir -p /tmp/release-scan
           tar -xzf "$TGZ" -C /tmp/release-scan
           # The tarball root is taken deterministically from the archive itself
-          # (the entry that owns a top-level package.json), not a find order.
-          ROOT="$(tar -tzf "$TGZ" | awk -F/ '$2=="package.json"{print $1; exit}')"
+          # (the top-level entry that owns a package.json). NOTE: no `exit`/
+          # `head` here — closing the pipe early makes GNU tar get SIGPIPE
+          # (weirdly BSD tar doesn't), which with `set -o pipefail` aborts the
+          # step; sort -u reads the whole listing (caught by the v0.5.6 dry-run).
+          ROOT="$(tar -tzf "$TGZ" | awk -F/ '$2=="package.json"{print $1}' | sort -u)"
           [[ -n "$ROOT" ]] || { echo "::error::no package.json in tarball"; exit 1; }
           cd "/tmp/release-scan/$ROOT"
           # Single source of truth: reuse the ban list that .githooks/pre-push
