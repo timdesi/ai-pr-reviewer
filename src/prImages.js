@@ -166,6 +166,11 @@ export async function transcribeViaAgent({
       agent: "pr-vision",
       model,
       file: tempImagePath,
+      // Isolate the agent's workspace to the screenshot directory: it processes
+      // author-controlled images, so its cwd must not be the app/review working
+      // directory (which holds source + review artifacts). OPENCODE_CONFIG_DIR
+      // still loads the configured agent/providers regardless (Copilot #17 HIGH).
+      cwd: tempDir,
       timeoutSeconds: Math.max(1, Math.ceil(Number(timeoutMs) / 1000)),
       standalone: config.opencode.standalone,
       env: { ...process.env, OPENCODE_CONFIG_DIR: config.opencode.agentDir },
@@ -174,14 +179,17 @@ export async function transcribeViaAgent({
     // runAgent *resolves* (never rejects) on timeout / non-zero exit / spawn
     // failure with `ok: false` — treat that as a failed transcription so a
     // truncated partial stream never becomes authoritative review context.
+    // The run can still have consumed billable tokens, so surface `usage` even
+    // when the caption is unusable: the caller prices it before marking the
+    // image unreadable (Copilot #17 MEDIUM 2).
     if (res?.ok === false) {
       log.warn(`vision: transcription failed: ${res.error || "agent call failed"}`);
-      return null;
+      return res?.usage ? { text: null, usage: res.usage } : null;
     }
     const text = res?.text?.trim();
     if (!text) {
       log.warn("vision: transcription returned no text");
-      return null;
+      return res?.usage ? { text: null, usage: res.usage } : null;
     }
     return { text, usage: res.usage ?? null };
   } catch (err) {
@@ -190,8 +198,12 @@ export async function transcribeViaAgent({
   } finally {
     if (tempDir) {
       // Cleanup is guaranteed even when the runner throws or times out; a
-      // failed rm must never turn the (non-fatal) step into an error.
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      // failed rm must never turn the (non-fatal) step into an error — but log
+      // the leftover directory and the reason so repeated failures do not
+      // accumulate silently (Copilot #17 MEDIUM 3).
+      await fs.rm(tempDir, { recursive: true, force: true }).catch((err) => {
+        log.warn(`vision: could not remove screenshot temp dir ${tempDir}: ${err.message}`);
+      });
     }
   }
 }
@@ -248,18 +260,21 @@ export async function loadScreenshotBlock({
         mimeType: downloaded.contentType || "image/png",
         timeoutMs: Number(review.visionCallTimeoutMs) || 60000,
       });
-      // Accept both the structured `{ text, usage }` and a plain string caption.
-      const caption = res ? (typeof res === "string" ? res : res.text) : null;
-      if (!caption) {
-        unreadable += 1;
-        continue;
-      }
+      // Price the agent run's tokens even when the caption is unusable (failed,
+      // timed out, or empty text): the run was billed, so record usage before
+      // the unreadable-path `continue` below (Copilot #17 MEDIUM 2).
       const u = res && typeof res === "object" ? res.usage : null;
       if (u) {
         usage.input += u.input || 0;
         usage.output += u.output || 0;
         usage.cacheRead += u.cacheRead || 0;
         usage.cacheWrite += u.cacheWrite || 0;
+      }
+      // Accept both the structured `{ text, usage }` and a plain string caption.
+      const caption = res ? (typeof res === "string" ? res : res.text) : null;
+      if (!caption) {
+        unreadable += 1;
+        continue;
       }
       entries.push({ sourceLabel, alt: img.alt || `image #${img.attachmentId || picked.indexOf({ ref: img }) + 1}`, caption });
     }

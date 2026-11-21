@@ -159,11 +159,28 @@ test("loadScreenshotBlock: accumulates transcription usage across images", async
     ref,
     description: "![1](attachment:1/1) ![2](attachment:1/2)",
     activities: [],
-    transcribe: async () => ({ text: "ok", usage: { input: 100, output: 50 } }),
+    transcribe: async () => ({ text: "ok", usage: { input: 100, output: 50, cacheRead: 5, cacheWrite: 2 } }),
   });
   assert.equal(res.transcribed, 2);
-  assert.deepEqual(res.usage, { input: 200, output: 100, cacheRead: 0, cacheWrite: 0 });
+  assert.deepEqual(res.usage, { input: 200, output: 100, cacheRead: 10, cacheWrite: 4 });
   assert.ok(res.block.includes("## PR screenshots (transcribed)"));
+});
+
+test("loadScreenshotBlock: records agent usage even when captions are unusable (cost preserved)", async () => {
+  const fetchBuffer = async () => ({ bytes: Buffer.from("x"), contentType: "image/png" });
+  const client = { fetchBuffer };
+  const res = await loadScreenshotBlock({
+    client,
+    config: baseConfig,
+    ref,
+    description: "![1](attachment:1/1) ![2](attachment:1/2)",
+    activities: [],
+    transcribe: async () => ({ text: null, usage: { input: 120, output: 40, cacheRead: 5, cacheWrite: 2 } }),
+  });
+  assert.equal(res.transcribed, 0);
+  assert.equal(res.unreadable, 2, "unusable captions count as unreadable");
+  assert.deepEqual(res.usage, { input: 240, output: 80, cacheRead: 10, cacheWrite: 4 }, "failed runs' tokens still priced (Copilot #17 MEDIUM 2)");
+  assert.ok(res.block.includes("could not be fetched/read"));
 });
 
 test("loadScreenshotBlock: oversized / non-image downloads are unreadable", async () => {
@@ -220,6 +237,7 @@ test("transcribeViaAgent: writes the image to a temp file and calls runAgent (--
   assert.equal(captured.env.OPENCODE_CONFIG_DIR, "/x/.opencode");
   assert.equal(captured.file.endsWith(".png"), true, "mime-derived extension");
   assert.ok(path.dirname(captured.file).split(path.sep).pop().startsWith("pr-vision-"), "file under a pr-vision- temp dir");
+  assert.equal(captured.cwd, path.dirname(captured.file), "cwd isolated to the screenshot temp dir (Copilot #17 HIGH)");
   assert.equal(Buffer.from(captured.written).toString(), "png", "image bytes written verbatim");
   assert.match(captured.message, /[Tt]ranscrib/);
   assert.deepEqual(out, { text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 } });
@@ -237,14 +255,32 @@ test("transcribeViaAgent: returns null and cleans up when the agent call fails (
   assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after runner throw");
 });
 
-test("transcribeViaAgent: ok:false (timeout/non-zero exit) with partial text → null", async () => {
-  const runner = async () => ({ ok: false, text: "partial transcription…", usage: null });
-  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+test("transcribeViaAgent: ok:false (timeout/non-zero exit) with partial text → null (usage preserved)", async () => {
+  assert.equal(
+    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ ok: false, text: "partial transcription…", usage: null }) }),
+    null,
+  );
+  // A billable run with no usable caption still reports its tokens (Copilot #17 MEDIUM 2).
+  assert.deepEqual(
+    await transcribeViaAgent({
+      config: visionConfig,
+      model: "m",
+      imageBytes: Buffer.from("x"),
+      runner: async () => ({ ok: false, text: "partial…", usage: { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 } }),
+    }),
+    { text: null, usage: { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 } },
+  );
 });
 
-test("transcribeViaAgent: empty/whitespace text → null", async () => {
-  const runner = async () => ({ text: "   ", usage: null });
-  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+test("transcribeViaAgent: empty/whitespace text → null (usage preserved)", async () => {
+  assert.equal(
+    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "   ", usage: null }) }),
+    null,
+  );
+  assert.deepEqual(
+    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "", usage: { input: 12, output: 3 } }) }),
+    { text: null, usage: { input: 12, output: 3 } },
+  );
 });
 
 test("transcribeViaAgent: missing model → null (skip)", async () => {
