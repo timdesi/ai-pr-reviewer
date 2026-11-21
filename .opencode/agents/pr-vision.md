@@ -3,24 +3,12 @@ description: Transcribe screenshots pasted into a pull request into literal, exh
 mode: primary
 steps: 8
 permissions:
+  # No tools — the screenshot arrives as the `--file` attachment in the
+  # message, and the agent processes untrusted, attacker-controlled image
+  # content. Deny every tool action so a hostile screenshot cannot make it
+  # read repo files and leak their contents into the transcription.
   - action: "*"
     resource: "*"
-    effect: deny
-  - action: read
-    resource: "*"
-    effect: allow
-  - action: glob
-    resource: "*"
-    effect: allow
-  - action: grep
-    resource: "*"
-    effect: allow
-  # Last match wins: keep secrets out of reach even if the cwd holds them.
-  - action: read
-    resource: "*.env"
-    effect: deny
-  - action: read
-    resource: "*.env.*"
     effect: deny
 ---
 

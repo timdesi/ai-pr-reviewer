@@ -143,8 +143,18 @@ export async function transcribeViaAgent({
 }) {
   let tempDir = null;
   try {
-    if (!model || !imageBytes) {
-      log.warn("vision: no model configured — skipping transcription");
+    if (!imageBytes) {
+      log.warn("vision: no image bytes — skipping transcription");
+      return null;
+    }
+    // Validate the model id before delegating (the old visionRoute refused
+    // unroutable ids without spawning anything): reject empty/whitespace,
+    // control chars, and path-shaped values so a misconfigured VISION_MODEL
+    // degrades to a log + skip instead of a doomed opencode run (AI review,
+    // #17 minor 3).
+    const m = String(model ?? "").trim();
+    if (!m || !/^[A-Za-z0-9][A-Za-z0-9._/#:-]*$/.test(m)) {
+      log.warn(`vision: no valid image-capable model configured (${model ?? "unset"}) — skipping transcription`);
       return null;
     }
     const ext = IMAGE_EXT[String(mimeType).toLowerCase()] || "png";

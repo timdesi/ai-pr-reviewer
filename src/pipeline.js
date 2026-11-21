@@ -352,6 +352,11 @@ export async function runReview({ ref, config, options = {} }) {
       transcribed: prImages?.transcribed ?? 0,
       unreadable: prImages?.unreadable ?? 0,
     };
+  } else if (config.review.fetchPrImages && !config.review.visionModel) {
+    // Transparent skip: the script flag/additive design is easy to trip up if
+    // someone enables fetchPrImages without VISION_MODEL — surface it instead
+    // of silently producing no screenshot block (AI review, #17 minor).
+    log.warn("vision: PR screenshots enabled (fetchPrImages) but VISION_MODEL is unset — skipping screenshot transcription");
   }
 
   // 2b–3b live inside the try below: cleanupCheckout in the finally must cover

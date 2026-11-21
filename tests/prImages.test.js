@@ -258,6 +258,22 @@ test("transcribeViaAgent: missing model → null (skip)", async () => {
   assert.equal(called, false, "runner never called without a model");
 });
 
+test("transcribeViaAgent: invalid model id → null before delegating (validate-before-delegate)", async () => {
+  let called = false;
+  const runner = async () => {
+    called = true;
+    return { text: "x" };
+  };
+  for (const bad of [" ", "foo bar", "/abs/path", "..\\win", "a\tb"]) {
+    assert.equal(
+      await transcribeViaAgent({ config: visionConfig, model: bad, imageBytes: Buffer.from("x"), runner }),
+      null,
+      `rejected: ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(called, false, "runner never called for an invalid model id");
+});
+
 test("transcribeViaAgent: timeoutSeconds floors at 1", async () => {
   let captured = null;
   const runner = async (arg) => {
