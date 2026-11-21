@@ -39,7 +39,7 @@ npm run build:agents    # regenerate .opencode/agents/ from prompts/ + scripts/b
 | `src/pipeline.js` | orchestrates fetch → reviewers → consensus → publish |
 | `src/context.js` | assembles review context: diff, Jira, repo `AGENTS.md`, curated `contexts/` |
 | `src/jira.js` | linked-ticket acceptance criteria, per-criterion verdicts |
-| `src/vision.js` `src/prImages.js` | screenshot transcription for UI changes |
+| `src/prImages.js` | screenshot transcription for UI changes (via the `.opencode/agents/pr-vision.md` agent, sourced from `prompts/vision-base.md`) |
 | `src/checkout.js` | real-commit checkout: shallow bare fetch into `WORKSPACE_ROOT` + per-repo worktree + disk maintenance |
 | `src/server.js` `src/ui.js` `src/pulls.js` | dashboard + stats |
 | `src/discussion.js` `src/previous.js` | mark already-explained findings resolved, avoid repeats |

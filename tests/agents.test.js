@@ -14,8 +14,23 @@ test("generated reviewer agents match the committed files", () => {
   }
 });
 
+test("pr-vision agent runs with no tools (deny-all permissions)", () => {
+  const agents = renderAgents();
+  const file = Object.keys(agents).find((f) => f.endsWith("pr-vision.md"));
+  assert.ok(file, "pr-vision.md is generated");
+  const text = agents[file];
+  // The screenshot arrives as the --file attachment in the message; the agent
+  // processes untrusted, attacker-controlled image content, so every tool
+  // action must be denied — a hostile screenshot must not be able to make it
+  // read repo files into the transcription (AI review, #17 MEDIUM).
+  assert.doesNotMatch(text, /^  - action: (read|glob|grep)$/m, "no read/glob/grep rules in pr-vision");
+  assert.match(text, /^  - action: "\*"[\s\S]*?effect: deny/m, "deny-all rule present");
+  assert.doesNotMatch(text, /effect: allow/, "no permission line allows any tool action");
+});
+
 test("agent prompts stay language-neutral (stack rules live in contexts/)", () => {
   const files = [...Object.keys(renderAgents()), new URL("../.opencode/agents/pr-consensus.md", import.meta.url)];
+  assert.ok(files.some((f) => f.endsWith("pr-vision.md")), "pr-vision.md is built and scanned");
   for (const f of files) {
     const text = readFileSync(f, "utf8");
     assert.doesNotMatch(text, /Feign|DateTimeFormatter|JLS|ManyToOne|open-in-view/, String(f));

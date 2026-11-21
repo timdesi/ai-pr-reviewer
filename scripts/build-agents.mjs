@@ -1,5 +1,6 @@
-// Generate .opencode/agents/pr-reviewer-{a,b,c}.md from prompts/reviewer-base.md
-// plus one prompts/lens-<x>.md per reviewer. Edit the sources, then run
+// Generate .opencode/agents/pr-reviewer-{a,b,c,d}.md from prompts/reviewer-base.md
+// plus one prompts/lens-<x>.md per reviewer, and .opencode/agents/pr-vision.md as
+// a verbatim copy of prompts/vision-base.md. Edit the sources, then run
 // `npm run build:agents`; `--check` exits 1 when the agents are stale.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -32,6 +33,9 @@ export function renderAgents() {
     const lens = parseLens(readFileSync(path.join(promptsDir, `lens-${key}.md`), "utf8"));
     out[path.join(agentsDir, `pr-reviewer-${key}.md`)] = renderReviewer(base, lens);
   }
+  // The vision agent carries its own frontmatter, so it is copied verbatim
+  // (same as reviewer-base.md does for the reviewers before lens substitution).
+  out[path.join(agentsDir, "pr-vision.md")] = readFileSync(path.join(promptsDir, "vision-base.md"), "utf8");
   return out;
 }
 

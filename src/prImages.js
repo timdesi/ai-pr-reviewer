@@ -8,11 +8,26 @@
 // Anything that cannot be fetched or read becomes a short "screenshots not
 // viewable — ask the author" note rather than a silent gap or an error.
 
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { log } from "./log.js";
 import { flattenActivitiesToComments } from "./discussion.js";
-import { transcribeImage } from "./vision.js";
+import { runAgent } from "./opencode.js";
 
 const IMAGE_MIME = /^image\//i;
+
+// The transcription contract is authored once in prompts/vision-base.md (the
+// `pr-vision` agent); this short message only points the agent at the task.
+const VISION_TRANSCRIBE_MESSAGE = "Transcribe the attached screenshot. Output only the transcription text.";
+
+const IMAGE_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
 
 /**
  * Find markdown image refs (`![alt](src)`) in a piece of PR text. A ref is
@@ -108,13 +123,100 @@ export function collectImageRefs({ description = "", comments = [], botUsernames
 }
 
 /**
+ * Transcribe one screenshot through the shared opencode agent runtime: write the
+ * image to a temp file, call the `pr-vision` agent with `--file`, and map the
+ * agent's usage back onto the `{ text, usage }` envelope the image step expects.
+ *
+ * `usage` is the standard 4-field agent shape `{ input, output, cacheRead,
+ * cacheWrite }` (or `null` when the stream carried no token data) — the upgrade
+ * from the old 2-field HTTP shape, so cache tokens are priced, not dropped.
+ * Never throws: any failure degrades to `null` (the caller counts it as
+ * unreadable). One agent call per image — no retry loop.
+ */
+export async function transcribeViaAgent({
+  config,
+  model,
+  imageBytes,
+  mimeType = "image/png",
+  timeoutMs = 60000,
+  runner = runAgent,
+}) {
+  let tempDir = null;
+  try {
+    if (!imageBytes) {
+      log.warn("vision: no image bytes — skipping transcription");
+      return null;
+    }
+    // Validate the model id before delegating (the old visionRoute refused
+    // unroutable ids without spawning anything): reject empty/whitespace,
+    // control chars, and path-shaped values so a misconfigured VISION_MODEL
+    // degrades to a log + skip instead of a doomed opencode run (AI review,
+    // #17 minor 3).
+    const m = String(model ?? "").trim();
+    if (!m || !/^[A-Za-z0-9][A-Za-z0-9._/#:-]*$/.test(m)) {
+      log.warn(`vision: no valid image-capable model configured (${model ?? "unset"}) — skipping transcription`);
+      return null;
+    }
+    const ext = IMAGE_EXT[String(mimeType).toLowerCase()] || "png";
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pr-vision-"));
+    const tempImagePath = path.join(tempDir, `image.${ext}`);
+    await fs.writeFile(tempImagePath, imageBytes);
+    const res = await runner({
+      bin: config.opencode.bin,
+      agent: "pr-vision",
+      model,
+      file: tempImagePath,
+      // Isolate the agent's workspace to the screenshot directory: it processes
+      // author-controlled images, so its cwd must not be the app/review working
+      // directory (which holds source + review artifacts). OPENCODE_CONFIG_DIR
+      // still loads the configured agent/providers regardless (Copilot #17 HIGH).
+      cwd: tempDir,
+      timeoutSeconds: Math.max(1, Math.ceil(Number(timeoutMs) / 1000)),
+      standalone: config.opencode.standalone,
+      env: { ...process.env, OPENCODE_CONFIG_DIR: config.opencode.agentDir },
+      message: VISION_TRANSCRIBE_MESSAGE,
+    });
+    // runAgent *resolves* (never rejects) on timeout / non-zero exit / spawn
+    // failure with `ok: false` — treat that as a failed transcription so a
+    // truncated partial stream never becomes authoritative review context.
+    // The run can still have consumed billable tokens, so surface `usage` even
+    // when the caption is unusable: the caller prices it before marking the
+    // image unreadable (Copilot #17 MEDIUM 2).
+    if (res?.ok === false) {
+      log.warn(`vision: transcription failed: ${res.error || "agent call failed"}`);
+      return res?.usage ? { text: null, usage: res.usage } : null;
+    }
+    const text = res?.text?.trim();
+    if (!text) {
+      log.warn("vision: transcription returned no text");
+      return res?.usage ? { text: null, usage: res.usage } : null;
+    }
+    return { text, usage: res.usage ?? null };
+  } catch (err) {
+    log.warn(`vision: transcription failed: ${err.message}`);
+    return null;
+  } finally {
+    if (tempDir) {
+      // Cleanup is guaranteed even when the runner throws or times out; a
+      // failed rm must never turn the (non-fatal) step into an error — but log
+      // the leftover directory and the reason so repeated failures do not
+      // accumulate silently (Copilot #17 MEDIUM 3).
+      await fs.rm(tempDir, { recursive: true, force: true }).catch((err) => {
+        log.warn(`vision: could not remove screenshot temp dir ${tempDir}: ${err.message}`);
+      });
+    }
+  }
+}
+
+/**
  * Build the "PR screenshots (transcribed)" context block. Returns
  * `{ block, usage, transcribed, unreadable }`:
- *   - `block`: the markdown block, or "" when there are no images or none could
- *     be read (callers then attach nothing — additive, non-fatal);
- *   - `usage`: `{ input, output }` token counts summed across every successful
- *     transcription (null when no image yielded usage), so the vision model's
- *     cost can be priced separately (see src/pipeline.js);
+ *   - `block`: the markdown block, or "" when there are no images, none could
+ *     be read (callers then attach nothing — additive, non-fatal), or no vision
+ *     model is configured (`review.visionModel` empty disables the whole step);
+ *   - `usage`: `{ input, output, cacheRead, cacheWrite }` token counts summed
+ *     across every successful transcription (null when no image yielded usage),
+ *     so the vision model's cost can be priced separately (see src/pipeline.js);
  *   - `transcribed` / `unreadable`: image counts for the dashboard row.
  * Never throws.
  */
@@ -124,12 +226,11 @@ export async function loadScreenshotBlock({
   ref,
   description = "",
   activities = [],
-  baseUrls,
-  transcribe = transcribeImage,
+  transcribe = transcribeViaAgent,
 }) {
   try {
     const { review } = config;
-    if (!client || !review.fetchPrImages) return EMPTY_RESULT;
+    if (!client || !review.fetchPrImages || !review.visionModel) return EMPTY_RESULT;
     const botUsernames = [config.bitbucket.username].filter(Boolean);
     const comments = flattenActivitiesToComments(activities);
     const items = collectImageRefs({ description, comments, botUsernames });
@@ -138,7 +239,7 @@ export async function loadScreenshotBlock({
 
     const entries = [];
     let unreadable = 0;
-    const usage = { input: 0, output: 0 };
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     for (const { ref: img, sourceLabel } of picked) {
       const downloaded = await downloadImage({
         client,
@@ -153,22 +254,27 @@ export async function loadScreenshotBlock({
         continue;
       }
       const res = await transcribe({
+        config,
         model: review.visionModel,
         imageBytes: downloaded.bytes,
         mimeType: downloaded.contentType || "image/png",
         timeoutMs: Number(review.visionCallTimeoutMs) || 60000,
-        baseUrls,
       });
+      // Price the agent run's tokens even when the caption is unusable (failed,
+      // timed out, or empty text): the run was billed, so record usage before
+      // the unreadable-path `continue` below (Copilot #17 MEDIUM 2).
+      const u = res && typeof res === "object" ? res.usage : null;
+      if (u) {
+        usage.input += u.input || 0;
+        usage.output += u.output || 0;
+        usage.cacheRead += u.cacheRead || 0;
+        usage.cacheWrite += u.cacheWrite || 0;
+      }
       // Accept both the structured `{ text, usage }` and a plain string caption.
       const caption = res ? (typeof res === "string" ? res : res.text) : null;
       if (!caption) {
         unreadable += 1;
         continue;
-      }
-      const u = res && typeof res === "object" ? res.usage : null;
-      if (u) {
-        usage.input += u.input || 0;
-        usage.output += u.output || 0;
       }
       entries.push({ sourceLabel, alt: img.alt || `image #${img.attachmentId || picked.indexOf({ ref: img }) + 1}`, caption });
     }
@@ -193,7 +299,7 @@ export async function loadScreenshotBlock({
     }
     const block = lines.join("\n");
     log.info(`PR screenshots attached (${entries.length} transcribed, ${unreadable} unreadable)`);
-    return { block, usage: usage.input || usage.output ? usage : null, transcribed: entries.length, unreadable };
+    return { block, usage: usage.input || usage.output || usage.cacheRead || usage.cacheWrite ? usage : null, transcribed: entries.length, unreadable };
   } catch (err) {
     log.warn(`vision: PR screenshots step degraded: ${err.message}`);
     return EMPTY_RESULT;
