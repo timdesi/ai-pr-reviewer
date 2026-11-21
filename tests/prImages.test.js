@@ -1,8 +1,9 @@
+import { readFileSync, existsSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractImageRefs, collectImageRefs, loadScreenshotBlock } from "../src/prImages.js";
-import { visionRoute, transcribeImage } from "../src/vision.js";
+import { extractImageRefs, collectImageRefs, loadScreenshotBlock, transcribeViaAgent } from "../src/prImages.js";
 
 const BOT = "mybot@example.com";
 const baseConfig = {
@@ -17,6 +18,13 @@ const baseConfig = {
   bitbucket: { baseUrl: "https://bb.example.com", username: BOT },
 };
 const ref = { projectKey: "P", repoSlug: "r", prId: 7 };
+
+// Stubbed-runner config for transcribeViaAgent: carries the `opencode` group the
+// default `runner = runAgent` reads (bin / agentDir / standalone).
+const visionConfig = {
+  ...baseConfig,
+  opencode: { bin: "opencode", agentDir: "/x/.opencode", standalone: false },
+};
 
 // --- extractImageRefs --------------------------------------------------------
 
@@ -154,7 +162,7 @@ test("loadScreenshotBlock: accumulates transcription usage across images", async
     transcribe: async () => ({ text: "ok", usage: { input: 100, output: 50 } }),
   });
   assert.equal(res.transcribed, 2);
-  assert.deepEqual(res.usage, { input: 200, output: 50 * 2 });
+  assert.deepEqual(res.usage, { input: 200, output: 100, cacheRead: 0, cacheWrite: 0 });
   assert.ok(res.block.includes("## PR screenshots (transcribed)"));
 });
 
@@ -173,152 +181,102 @@ test("loadScreenshotBlock: oversized / non-image downloads are unreadable", asyn
   assert.ok(res.block.includes("could not be fetched/read"));
 });
 
-// --- vision routing ----------------------------------------------------------
-
-test("visionRoute maps llmgw-gpt to the Azure deployments route", () => {
-  const r = visionRoute("llmgw-gpt/gpt-6-luna");
-  assert.ok(r);
-  assert.match(r.url, /\/api\/openai\/deployments\/gpt-6-luna\/chat\/completions\?api-version=2025-04-01-preview$/);
-  assert.equal(r.model, "gpt-6-luna");
-});
-
-test("visionRoute: bare id defaults to llmgw-gpt; llmgw/claude maps to the Anthropic route; others are null", () => {
-  assert.equal(visionRoute("gpt-6-luna").model, "gpt-6-luna");
-  const anthropic = visionRoute("llmgw/claude-haiku-5-5");
-  assert.ok(anthropic);
-  assert.equal(anthropic.kind, "anthropic");
-  assert.equal(anthropic.model, "claude-haiku-5-5");
-  assert.match(anthropic.url, /\/api\/google\/v1\/publishers\/anthropic\/models\/claude-haiku-5-5:rawPredict$/);
-  assert.equal(visionRoute("acme/bogus-1"), null);
-  assert.equal(visionRoute(""), null);
-});
-
-test("visionRoute: llmgw-msp uses the model's per-model base URL from the config", () => {
-  assert.equal(visionRoute("llmgw-msp/Qwen-27B"), null, "no base-URL map -> unroutable");
-  const bases = { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" };
-  const r = visionRoute("llmgw-msp/Qwen-27B", bases);
-  assert.ok(r);
-  assert.equal(r.kind, "openai");
-  assert.equal(r.model, "Qwen-27B");
-  assert.equal(r.url, "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/chat/completions");
-});
-
-test("transcribeImage routes llmgw-msp to the per-model chat/completions endpoint", async () => {
-  const seen = [];
-  const orig = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    seen.push({ url: String(url), hasImage: String(init.body).includes('"image_url"') });
-    return {
-      ok: true,
-      status: 200,
-      text: async () =>
-        JSON.stringify({ choices: [{ message: { content: "qwen read it" } }], usage: { prompt_tokens: 9, completion_tokens: 3 } }),
-    };
-  };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
-  try {
-    const out = await transcribeImage({
-      model: "llmgw-msp/Qwen-27B",
-      imageBytes: Buffer.from("png"),
-      mimeType: "image/png",
-      baseUrls: { "llmgw-msp/Qwen-27B": "https://llm-gateway.example.com/api/providers/example/msp/qwen-27b/v1/" },
-    });
-    assert.equal(out.text, "qwen read it");
-    assert.deepEqual(out.usage, { input: 9, output: 3 });
-    assert.equal(seen.length, 1);
-    assert.match(seen[0].url, /qwen-27b\/v1\/chat\/completions$/);
-    assert.ok(seen[0].hasImage);
-  } finally {
-    globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
-  }
-});
-
-test("transcribeImage posts the image and returns { text, usage } parsed from the response", async () => {
-  const seen = [];
-  const orig = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    seen.push({ url: String(url), hasImage: String(init.body).includes('"image_url"'), hasB64: String(init.body).includes("data:image/png;base64,") });
-    return {
-      ok: true,
-      status: 200,
-      text: async () =>
-        JSON.stringify({
-          choices: [{ message: { content: "verified 5 rows" } }],
-          usage: { prompt_tokens: 120, completion_tokens: 40 },
-        }),
-    };
-  };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
-  try {
-    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("png"), mimeType: "image/png" });
-    assert.equal(out.text, "verified 5 rows");
-    assert.deepEqual(out.usage, { input: 120, output: 40 });
-    assert.equal(seen.length, 1);
-    assert.ok(seen[0].hasImage && seen[0].hasB64);
-  } finally {
-    globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
-  }
-});
-
-test("transcribeImage speaks the Anthropic messages format over :rawPredict (llmgw/claude-*)", async () => {
-  const seen = [];
-  const orig = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    seen.push({
-      url: String(url),
-      body: JSON.parse(init.body),
-      hasB64: String(init.body).includes('"data":"'),
-      sticky: init.headers["x-sticky-session-instance"],
-    });
-    return {
-      ok: true,
-      status: 200,
-      text: async () =>
-        JSON.stringify({
-          content: [{ type: "text", text: "screenshot shows the login form" }],
-          usage: { input_tokens: 150, output_tokens: 30 },
-        }),
-    };
-  };
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
-  try {
-    const out = await transcribeImage({ model: "llmgw/claude-haiku-5-5", imageBytes: Buffer.from("png"), mimeType: "image/png" });
-    assert.equal(out.text, "screenshot shows the login form");
-    assert.deepEqual(out.usage, { input: 150, output: 30 });
-    assert.equal(seen.length, 1);
-    assert.match(seen[0].url, /claude-haiku-5-5:rawPredict$/);
-    assert.equal(seen[0].body.anthropic_version, "vertex-2023-10-16");
-    assert.equal(seen[0].body.max_tokens, 700);
-    const image = seen[0].body.messages[0].content.find((c) => c.type === "image");
-    assert.equal(image.source.media_type, "image/png");
-    assert.equal(image.source.type, "base64");
-    assert.ok(seen[0].hasB64);
-    assert.equal(seen[0].sticky, "01");
-  } finally {
-    globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
-  }
-});
-
-test("transcribeImage returns null without a token, on route miss, or with no text (never throws)", async () => {
-  assert.equal(await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") }), null); // no token
-  assert.equal(await transcribeImage({ model: "acme/bogus-1", imageBytes: Buffer.from("x") }), null); // not routable
-  // Text-only response without usage -> { text, usage: null }.
-  const orig = globalThis.fetch;
-  globalThis.fetch = async () => ({
-    ok: true,
-    status: 200,
-    text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+test("loadScreenshotBlock: empty visionModel skips the image step (empty block, no unreadable note)", async () => {
+  const client = { fetchBuffer: async () => ({ bytes: Buffer.from("x"), contentType: "image/png" }) };
+  const res = await loadScreenshotBlock({
+    client,
+    config: { ...baseConfig, review: { ...baseConfig.review, visionModel: "" } },
+    ref,
+    description: "![a](attachment:1/2)",
+    activities: [],
   });
-  process.env.ANTHROPIC_AUTH_TOKEN = "tok";
-  try {
-    const out = await transcribeImage({ model: "llmgw-gpt/gpt-6-luna", imageBytes: Buffer.from("x") });
-    assert.equal(out.text, "ok");
-    assert.equal(out.usage, null);
-  } finally {
-    globalThis.fetch = orig;
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
-  }
+  assert.deepEqual(res, { block: "", usage: null, transcribed: 0, unreadable: 0 });
+  assert.ok(!res.block.includes("could not be fetched/read"), "downloads never attempted, no degrade note");
+});
+
+// --- transcribeViaAgent ------------------------------------------------------
+
+test("transcribeViaAgent: writes the image to a temp file and calls runAgent (--agent pr-vision / --model / --file / timeout)", async () => {
+  let captured = null;
+  const runner = async (arg) => {
+    captured = arg;
+    captured.written = readFileSync(arg.file); // bytes must be on disk before the call
+    return { text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 } };
+  };
+  const out = await transcribeViaAgent({
+    config: visionConfig,
+    model: "llmgw-gpt/gpt-6-luna",
+    imageBytes: Buffer.from("png"),
+    mimeType: "image/png",
+    timeoutMs: 60000,
+    runner,
+  });
+  assert.ok(captured, "runner called exactly once");
+  assert.equal(captured.agent, "pr-vision");
+  assert.equal(captured.model, "llmgw-gpt/gpt-6-luna");
+  assert.equal(captured.bin, "opencode");
+  assert.equal(captured.timeoutSeconds, 60);
+  assert.equal(captured.standalone, false);
+  assert.equal(captured.env.OPENCODE_CONFIG_DIR, "/x/.opencode");
+  assert.equal(captured.file.endsWith(".png"), true, "mime-derived extension");
+  assert.ok(path.dirname(captured.file).split(path.sep).pop().startsWith("pr-vision-"), "file under a pr-vision- temp dir");
+  assert.equal(Buffer.from(captured.written).toString(), "png", "image bytes written verbatim");
+  assert.match(captured.message, /[Tt]ranscrib/);
+  assert.deepEqual(out, { text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 } });
+  assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after success");
+});
+
+test("transcribeViaAgent: returns null and cleans up when the agent call fails (never throws)", async () => {
+  let captured = null;
+  const runner = async (arg) => {
+    captured = arg;
+    throw new Error("boom");
+  };
+  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+  assert.ok(captured, "runner was reached");
+  assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after runner throw");
+});
+
+test("transcribeViaAgent: ok:false (timeout/non-zero exit) with partial text → null", async () => {
+  const runner = async () => ({ ok: false, text: "partial transcription…", usage: null });
+  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+});
+
+test("transcribeViaAgent: empty/whitespace text → null", async () => {
+  const runner = async () => ({ text: "   ", usage: null });
+  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+});
+
+test("transcribeViaAgent: missing model → null (skip)", async () => {
+  let called = false;
+  const runner = async () => {
+    called = true;
+    return { text: "x" };
+  };
+  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "", imageBytes: Buffer.from("x"), runner }), null);
+  assert.equal(await transcribeViaAgent({ config: visionConfig, imageBytes: Buffer.from("x"), runner }), null);
+  assert.equal(called, false, "runner never called without a model");
+});
+
+test("transcribeViaAgent: timeoutSeconds floors at 1", async () => {
+  let captured = null;
+  const runner = async (arg) => {
+    captured = arg;
+    return { text: "ok" };
+  };
+  await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), timeoutMs: 500, runner });
+  assert.equal(captured.timeoutSeconds, 1);
+});
+
+test("transcribeViaAgent: mime type maps to the file extension (unknown → png)", async () => {
+  const exts = [];
+  const runner = async (arg) => {
+    exts.push(path.extname(arg.file));
+    return { text: "ok" };
+  };
+  await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), mimeType: "image/jpeg", runner });
+  await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), mimeType: "image/webp", runner });
+  await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), mimeType: "image/svg+xml", runner });
+  await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }); // default png
+  assert.deepEqual(exts, [".jpg", ".webp", ".png", ".png"]);
 });

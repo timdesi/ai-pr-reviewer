@@ -124,6 +124,7 @@ test("server /api/models marks image-capable models and gates the vision slot", 
     process.env.BITBUCKET_API_TOKEN = "tok";
     process.env.MODEL_SETTINGS_FILE = settings;
     process.env.PUBLISH_TO_BITBUCKET = "0";
+    delete process.env.VISION_MODEL; // no default: unset/empty disables transcription
     const config = loadConfig({ envFile: tmpFile("nonexistent.env") });
     config.costs.configPath = template; // deterministic model list from the template
     const created = createServer({ config, port: 0 });
@@ -144,7 +145,7 @@ test("server /api/models marks image-capable models and gates the vision slot", 
     assert.equal(byId["llmgw-msp/DeepSeek-V4-Flash"], false, "DeepSeek V4 Flash 0731 is text-only");
     assert.equal(byId["llmgw-msp/glm-52"], false, "GLM-5.2 is text-only");
     assert.equal(byId["llmgw-glm/glm-5"], undefined, "GLM-5 MaaS removed from config");
-    assert.equal(j.assigned.vision, "llmgw-gpt/gpt-6-luna", "default vision assignment present");
+    assert.equal(j.assigned.vision, "", "no VISION_MODEL env → unset default (transcription disabled)");
 
     // PUT: a non-image-capable model is rejected for the vision slot.
     const bad = await fetch(`${base}/api/models`, {

@@ -16,7 +16,7 @@ import { runAgent } from "./opencode.js";
 import { extractTrailingJson } from "./extractJson.js";
 import { validateReviewerReport, validateConsensusReport, repairReportKeys } from "./validate.js";
 import { renderFinalReport, renderComment } from "./report.js";
-import { loadModelPrices, loadModelBaseUrls, defaultPriceCandidates, computeCost } from "./costs.js";
+import { loadModelPrices, defaultPriceCandidates, computeCost } from "./costs.js";
 import { loadJiraContext, buildAcView } from "./jira.js";
 import { groundFindings, changedPathSet } from "./grounding.js";
 import { findPreviousReview, renderPreviousReview } from "./previous.js";
@@ -327,23 +327,18 @@ export async function runReview({ ref, config, options = {} }) {
     if (discussionBlock) log.info(`PR discussion attached (${Buffer.byteLength(discussionBlock, "utf8")} bytes)`);
   }
   let prImagesBlock = "";
-  if (config.review.fetchPrImages) {
-    // Per-model base URLs (MSP endpoints etc.) so the vision transcriber calls
-    // the exact deployment opencode uses — same config source as the prices.
-    const visionBaseUrls = loadModelBaseUrls(
-      defaultPriceCandidates({
-        projectRoot: config.projectRoot,
-        home: process.env.HOME,
-        override: config.costs?.configPath,
-      }),
-    );
+  if (config.review.fetchPrImages && config.review.visionModel) {
+    // Screenshot transcription runs through the shared opencode agent runtime:
+    // the `pr-vision` agent (prompts/vision-base.md) gets the image attached via
+    // `--file`, exactly like the reviewers/consensus get their context file.
+    // Routing/auth come solely from the opencode agent config — the old
+    // vision-specific provider/token/base-URL surface is gone.
     const prImages = await loadScreenshotBlock({
       client,
       config,
       ref,
       description: pullRequest.description || "",
       activities: activities ?? [],
-      baseUrls: visionBaseUrls,
     });
     prImagesBlock = prImages?.block || "";
     // The vision transcription is priced separately from the reviewers (its own

@@ -261,10 +261,13 @@ export function loadConfig({ envFile } = {}) {
       // non-fatal (see src/prImages.js). Unreadable images become a short
       // "screenshots not viewable — ask the author" note, never an error.
       fetchPrImages: bool("FETCH_PR_IMAGES", true),
-      // Vision model used for the transcription (OpenAI-compatible image input).
-      // Default: GPT-6 Luna on the LLM Gateway (azure deployments route). Swappable
-      // without a rebuild.
-      visionModel: str("VISION_MODEL", "llmgw-gpt/gpt-6-luna"),
+      // Vision model used for the screenshot transcription. Must be an
+      // image-capable opencode model id (declared `capabilities.input` in the
+      // opencode config; the Models dialog enforces it). Routing/auth come from
+      // the opencode agent config (docker/opencode.json.template) — never from a
+      // literal provider name here. Unset/empty disables screenshot
+      // transcription entirely (no downloads, no block, no vision cost row).
+      visionModel: str("VISION_MODEL"),
       // Safety caps for the image step: max images transcribed per review, max
       // bytes per download, and per-call timeouts.
       visionMaxImages: num("VISION_MAX_IMAGES", 6),
