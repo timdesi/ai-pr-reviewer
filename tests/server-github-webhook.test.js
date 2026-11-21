@@ -238,3 +238,21 @@ test("static UI app.js serves the raw empty object when no modelOverrides config
   });
 });
 
+test("static UI app.js: display names with $ sequences are injected verbatim, not interpreted", async () => {
+  // A `$` in a display name must not be treated as a $&/$1 replacement token
+  // by String.replace — the substituted dashboard would corrupt otherwise (AI
+  // review #18 minor). Use a replacer function and assert byte-fidelity.
+  const overrides = { "acme-gpt/gpt-6-luna": "GPT $LUNA & $& $1" };
+  const config = baseConfig({ ui: { modelOverrides: overrides } });
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    const js = await res.text();
+    assert.ok(js.includes('"acme-gpt/gpt-6-luna":"GPT $LUNA & $& $1"'), `dollar sequences survive: ${js.match(/const MODEL_OVERRIDES = [^;]+/)?.[0] ?? "no match"}`);
+    // And the served declaration must still parse as valid JS with the value intact.
+    const seg = js.slice(js.indexOf("const MODEL_OVERRIDES"), js.indexOf("function friendlyModel", js.indexOf("const MODEL_OVERRIDES")));
+    const val = new Function(`${seg}\nreturn JSON.stringify(MODEL_OVERRIDES);`)();
+    assert.equal(JSON.parse(val)["acme-gpt/gpt-6-luna"], "GPT $LUNA & $& $1");
+  });
+});
+

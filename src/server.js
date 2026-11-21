@@ -74,13 +74,19 @@ const MIME = {
 const UI_OVERRIDES_MARKER = "/*__MODEL_OVERRIDES__*/";
 export function substituteUiModelOverrides(content, overrides) {
   if (!content.includes(UI_OVERRIDES_MARKER)) return content;
+  // The overrides are a JSON object (possibly empty). `overrides` may be a
+  // plain object only — config coerces MODEL_OVERRIDES_JSON to {}/default
+  // otherwise, so an array/null never reaches us. Pass the replacement as a
+  // function so a display name containing `$` (e.g. "GPT $LUNA", a template
+  // placeholder) cannot be interpreted as a `$&`/`$1` substitute sequence and
+  // corrupt the served dashboard script (AI review #18 minor).
   const injected =
-    overrides && typeof overrides === "object" && Object.keys(overrides).length
+    overrides && typeof overrides === "object" && !Array.isArray(overrides) && Object.keys(overrides).length
       ? JSON.stringify(overrides)
       : "{}";
   // Replace the marker AND the empty-object fallback that follows it, so the
   // served file ends with exactly one object literal (no `{…} {}`).
-  return content.replace(new RegExp(`${escapeRegExp(UI_OVERRIDES_MARKER)}\\s*\\{\\}`), injected);
+  return content.replace(new RegExp(`${escapeRegExp(UI_OVERRIDES_MARKER)}\\s*\\{\\}`), () => injected);
 }
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

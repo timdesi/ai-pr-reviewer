@@ -66,12 +66,18 @@ function list(name) {
     .filter(Boolean);
 }
 
-/** Parses a JSON-typed env value; malformed/empty falls back to `fallback`. */
+/** Parses a JSON-typed env value; malformed/non-object/empty falls back to
+ * `fallback`. Kept object-only: ui.modelOverrides is read as a plain map, so a
+ * JSON array or `null` (valid JSON but wrong shape) degrades to the default
+ * rather than silently becoming an unusable config value (AI review #18 minor). */
 function json(name, fallback) {
   const v = str(name);
   if (v === "") return fallback;
   try {
-    return JSON.parse(v);
+    const parsed = JSON.parse(v);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) && !Buffer.isBuffer(parsed)
+      ? parsed
+      : fallback;
   } catch {
     return fallback;
   }
