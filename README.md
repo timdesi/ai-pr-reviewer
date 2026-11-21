@@ -181,6 +181,14 @@ complete multi-provider setup against an OpenAI/Anthropic-compatible gateway.
 Replace the placeholder host (`llm-gateway.example.com`) and credentials with
 your own, or point the IDs at providers you already have configured.
 
+Screenshots pasted into a PR are transcribed by a **`pr-vision` OpenCode
+agent** (`prompts/vision-base.md`, compiled to `.opencode/agents/pr-vision.md`)
+that gets the image attached via `--file`; it never reads the repo, and its
+routing/auth come entirely from the OpenCode provider config — application
+source carries no provider name, token env-var name, or gateway URL. The only
+vision knob is `VISION_MODEL`, an image-capable model id passed to the agent at
+run time, exactly like the reviewer/consensus models.
+
 - `VISION_MODEL` must be **image-capable** (declare `capabilities.input` with
   `image` in the OpenCode config).
 - The consensus model reads roughly 60 KB of reviewer reports, so pick one that
@@ -282,6 +290,36 @@ start-up the entrypoint renders the OpenCode config from
 Point it at your own Bitbucket/GitHub, model gateway, and container registry.
 Remember to replace the template's placeholder gateway host before building for
 real use.
+
+### Zero-divergence rule
+
+**Code is never edited in a pack; deployment differences are env + build-config
+only.** Application source (`src/`) carries no provider name, token env-var
+name, or gateway URL — every deployment-specific value comes from environment
+variables and build-config (`docker/`, `.env.example`). A deployed pack that
+mirrors the public `src/` therefore behaves identically under the same env, and
+never needs a fork or a patch. This holds for screenshots too: the `pr-vision`
+agent and its `VISION_MODEL` come from config/env, so no vision-specific
+routing lives in source either.
+
+### Syncing a deployment pack
+
+Copy-based, one command — no patch or merge step:
+
+```bash
+rsync --archive --delete <repo>/src/ <pack>/src/
+# optionally exclude pack-local files:
+# rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/
+```
+
+Then verify source parity (the diff must be empty):
+
+```bash
+diff -rq <repo>/src <pack>/src && echo "in sync"
+```
+
+On a release, bump the pack's image tag and rebuild; the app itself is fetched
+in full from the public repo, so a pack never accumulates a source fork.
 
 ## Development
 
