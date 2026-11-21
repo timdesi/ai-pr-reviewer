@@ -120,3 +120,32 @@ test("loadConfig refuses to start with an invalid AUTO_REVIEW_OFF_REPOS entry", 
     assert.throws(() => loadConfig({ envFile: "/nonexistent/none.env" }), /PROJECT\/repo-slug/);
   });
 });
+
+test("loadConfig: ui.modelOverrides defaults to the portable example-gateway map", () => {
+  withEnv({ MODEL_OVERRIDES_JSON: "" }, () => {
+    const config = loadConfig({ envFile: "/nonexistent/none.env" });
+    assert.equal(config.ui.modelOverrides["llmgw-gpt/gpt-6-luna"], "GPT-6 Luna");
+    assert.ok(Object.keys(config.ui.modelOverrides).length >= 5);
+  });
+});
+
+test("loadConfig: ui.modelOverrides parses MODEL_OVERRIDES_JSON and ignores malformed JSON", () => {
+  withEnv(
+    {
+      MODEL_OVERRIDES_JSON: JSON.stringify({
+        "acme-gpt/gpt-6-luna": "GPT-6 Luna",
+        "acme-openai/deepseek-v4-pro": "DeepSeek V4 Pro",
+      }),
+    },
+    () => {
+      const config = loadConfig({ envFile: "/nonexistent/none.env" });
+      assert.equal(config.ui.modelOverrides["acme-gpt/gpt-6-luna"], "GPT-6 Luna");
+      assert.equal(config.ui.modelOverrides["acme-openai/deepseek-v4-pro"], "DeepSeek V4 Pro");
+    },
+  );
+  withEnv({ MODEL_OVERRIDES_JSON: "{not valid json" }, () => {
+    // Malformed JSON must not crash startup; falls back to the default map.
+    const config = loadConfig({ envFile: "/nonexistent/none.env" });
+    assert.equal(config.ui.modelOverrides["llmgw-gpt/gpt-6-luna"], "GPT-6 Luna");
+  });
+});

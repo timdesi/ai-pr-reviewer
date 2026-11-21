@@ -21,7 +21,7 @@ approval, merge, decline, or code change.
   getters. No config value should be hard-coded in modules.
 
 ```bash
-npm test                # agent build-check + full node:test suite (327 tests)
+npm test                # agent build-check + full node:test suite (344 tests)
 npm run review          # one-shot review via the CLI (src/cli.js)
 npm run ui              # run the dashboard server (src/server.js)
 npm run build:agents    # regenerate .opencode/agents/ from prompts/ + scripts/build-agents.mjs
@@ -77,7 +77,7 @@ npm run build:agents    # regenerate .opencode/agents/ from prompts/ + scripts/b
 ## Working here
 
 1. Small, focused changes with a regression test for bug fixes.
-2. Run `npm test` — all 327 must pass — before pushing.
+2. Run `npm test` — all 344 must pass — before pushing.
 3. The real deployment is built from a separate local copy; changes here are
    mirrored over at release time. Never check in deployment-specific values.
 4. Let the bot's AI review run on a PR before merging — a fresh `ai-review`

@@ -211,3 +211,30 @@ test("PUBLISH_TO_GITHUB=1 makes the posted review publish:true", async () => {
     assert.equal(records[0].publish, true, "PUBLISH_TO_GITHUB=1 → publish on");
   });
 });
+
+test("static UI app.js injects ui.modelOverrides over the __MODEL_OVERRIDES__ marker", async () => {
+  const overrides = { "acme-gpt/gpt-6-luna": "GPT-6 Luna", "acme-openai/deepseek-v4-pro": "DeepSeek V4 Pro" };
+  const config = baseConfig({ ui: { modelOverrides: overrides } });
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/javascript/);
+    const js = await res.text();
+    assert.ok(!js.includes("__MODEL_OVERRIDES__"), "marker must be substituted away");
+    assert.ok(js.includes('"acme-gpt/gpt-6-luna":"GPT-6 Luna"'), "override injected verbatim");
+    // Served file must still be a single valid assignment: marker + fallback {} are
+    // both replaced, leaving exactly one object literal.
+    assert.match(js, /const MODEL_OVERRIDES = \{"acme-gpt\/gpt-6-luna":"GPT-6 Luna","acme-openai\/deepseek-v4-pro":"DeepSeek V4 Pro"\};/);
+  });
+});
+
+test("static UI app.js serves the raw empty object when no modelOverrides configured", async () => {
+  const config = baseConfig(); // no ui.modelOverrides
+  await withServer({ config }, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(res.status, 200);
+    const js = await res.text();
+    assert.match(js, /const MODEL_OVERRIDES = \{\};/, "empty overrides → empty object, file still valid");
+  });
+});
+

@@ -66,6 +66,17 @@ function list(name) {
     .filter(Boolean);
 }
 
+/** Parses a JSON-typed env value; malformed/empty falls back to `fallback`. */
+function json(name, fallback) {
+  const v = str(name);
+  if (v === "") return fallback;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * AUTO_REVIEW_OFF_REPOS: comma-separated `PROJECT/repo-slug` entries whose
  * automatic review trigger (reviewer added / PR opened with a reviewer / draft
@@ -117,6 +128,25 @@ export function parseReviewerSkipBranchPairs(text) {
  * malformed override regex is skipped, never fatal.
  */
 export const DEFAULT_TRANSLATION_PATTERNS = ["(^|/)i18n/.+\\.json$", "\\.po$", "\\.pot$"];
+
+/**
+ * Portable model-id → display-name overrides for the dashboard. Values here are
+ * the public/example gateway names only; deployment-specific names are injected
+ * via MODEL_OVERRIDES_JSON at runtime (see `ui.modelOverrides`), so `ui/app.js`
+ * stays byte-identical for every deployment (zero-divergence, issues #14/#16).
+ */
+export const DEFAULT_MODEL_OVERRIDES = {
+  "myprovider/discretestack-stable-fast": "DiscreteStack Stable Fast",
+  "myprovider/discretestack-stable": "DiscreteStack Stable",
+  "llmgw-anthropic/claude-haiku-5-5": "Claude Haiku 5.5",
+  "llmgw/claude-haiku-5-5": "Claude Haiku 5.5",
+  "llmgw-gpt/gpt-6-luna": "GPT-6 Luna",
+  "llmgw-openai/deepseek-v4-pro": "DeepSeek V4 Pro",
+  "llmgw-msp/glm-52": "GLM-5 (MSP)",
+  "llmgw-msp/DeepSeek-V4-Flash": "DeepSeek V4 Flash (MSP)",
+  "llmgw-msp/Qwen-27B": "Qwen 27B (MSP)",
+  "llmgw-deepseek-flash/deepseek-v4-flash": "DeepSeek V4 Flash",
+};
 
 export function parsePathPatterns(text, fallback = DEFAULT_TRANSLATION_PATTERNS) {
   const raw = String(text ?? "").trim();
@@ -315,6 +345,13 @@ export function loadConfig({ envFile } = {}) {
     server: {
       host: str("HOST", "127.0.0.1"),
       port: int("PORT", 8123),
+    },
+    ui: {
+      // Model-id → display-name overrides injected into the dashboard at serve
+      // time (MODEL_OVERRIDES_JSON env, JSON object). Defaults to the portable
+      // example-gateway names; deployments override with their own ids so
+      // ui/app.js stays identical across repos (zero-divergence).
+      modelOverrides: json("MODEL_OVERRIDES_JSON", DEFAULT_MODEL_OVERRIDES),
     },
   };
 

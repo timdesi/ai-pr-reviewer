@@ -1232,18 +1232,12 @@ const AGENT_KEYS = ["a", "b", "c", "d", "consensus"];
 
 // Model IDs used by the pipeline -> human-friendly names (kept tidy even where
 // the raw provider/model id changes, e.g. myprovider/discretestack-stable-fast).
-const MODEL_OVERRIDES = {
-  "myprovider/discretestack-stable-fast": "DiscreteStack Stable Fast",
-  "myprovider/discretestack-stable": "DiscreteStack Stable",
-  "llmgw-anthropic/claude-haiku-5-5": "Claude Haiku 5.5",
-  "llmgw/claude-haiku-5-5": "Claude Haiku 5.5",
-  "llmgw-gpt/gpt-6-luna": "GPT-6 Luna",
-  "llmgw-openai/deepseek-v4-pro": "DeepSeek V4 Pro",
-  "llmgw-msp/glm-52": "GLM-5 (MSP)",
-  "llmgw-msp/DeepSeek-V4-Flash": "DeepSeek V4 Flash (MSP)",
-  "llmgw-msp/Qwen-27B": "Qwen 27B (MSP)",
-  "llmgw-deepseek-flash/deepseek-v4-flash": "DeepSeek V4 Flash",
-};
+// The server injects the deployment's map at serve time over the marker below
+// (from ui.modelOverrides / MODEL_OVERRIDES_JSON), so this file stays
+// byte-identical across deployments (zero-divergence). The marker is replaced
+// by a JSON object literal, e.g. {"id":"Name",...}. Raw (unserved) the empty
+// object stands in and friendlyModel() humanises ids.
+const MODEL_OVERRIDES = /*__MODEL_OVERRIDES__*/ {};
 
 function friendlyModel(id) {
   if (!id) return "?";

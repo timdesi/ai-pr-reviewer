@@ -62,6 +62,30 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// The dashboard substitutes its model-id -> display-name overrides into
+// ui/app.js at serve time (marker `/*__MODEL_OVERRIDES__*/{}`), so the static
+// file stays byte-identical across deployments (zero-divergence, issues
+// #14/#16) and each deployment feeds its own provider/model names via
+// ui.modelOverrides (MODEL_OVERRIDES_JSON env). No marker in the file => the
+// file is served verbatim, so the substitution is opt-in per file. The marker
+// form is deliberately `/*__MODEL_OVERRIDES__*/{}`: raw (unserved) the file is
+// valid JS (a comment before an empty object); served, the whole marker
+// sequence is replaced by a JSON object literal so exactly one object remains.
+const UI_OVERRIDES_MARKER = "/*__MODEL_OVERRIDES__*/";
+export function substituteUiModelOverrides(content, overrides) {
+  if (!content.includes(UI_OVERRIDES_MARKER)) return content;
+  const injected =
+    overrides && typeof overrides === "object" && Object.keys(overrides).length
+      ? JSON.stringify(overrides)
+      : "{}";
+  // Replace the marker AND the empty-object fallback that follows it, so the
+  // served file ends with exactly one object literal (no `{…} {}`).
+  return content.replace(new RegExp(`${escapeRegExp(UI_OVERRIDES_MARKER)}\\s*\\{\\}`), injected);
+}
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // Deliver a finished review's public comment to Bitbucket, guarding against a
 // changed head. Used by the manual "post saved draft" button (with optional
 // edited text) and by the webhook dedup path (an already-reviewed head is
@@ -711,7 +735,9 @@ export function createServer({ config, port = config.server.port, host = config.
       const filePath = path.normalize(path.join(UI_DIR, path.basename(url)));
       if (filePath.startsWith(UI_DIR) && existsSync(filePath)) {
         res.writeHead(200, { "Content-Type": MIME[path.extname(filePath)] || "application/octet-stream" });
-        return res.end(readFileSync(filePath));
+        const raw = readFileSync(filePath);
+        const body = filePath.endsWith(".js") ? substituteUiModelOverrides(raw.toString(), config.ui?.modelOverrides) : raw;
+        return res.end(body);
       }
 
       return sendJson(res, 404, { error: "not found" });

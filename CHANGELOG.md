@@ -10,6 +10,40 @@ below the `v0.2.x` entries.
 
 ---
 
+## v0.5.6 — 2026-11-21 — Zero-divergence release + env-driven dashboard model names
+
+- **Vision transcription is now an OpenCode agent (`pr-vision`), not a bespoke
+  HTTP client.** The old `src/vision.js` raw-HTTP transcriber (provider/token/
+  base-URL surface + baked-in default) is deleted; screenshots are transcribed
+  by the compiled `pr-vision` agent (`prompts/vision-base.md`), which receives
+  the image via `--file`, runs **deny-all / tool-less**, in an isolated temp
+  working directory, with the vision model passed through `VISION_MODEL`. This
+  closes the last app-level fork between this repo and deployment packs —
+  provider routing/auth now comes entirely from the OpenCode config/env, never
+  from source. ([#16], [#17])
+- **Zero-divergence rule documented + enforced.** README: "zero-divergence rule"
+  (code is never edited in a pack; deployment differences are env + build-config
+  only) and "Syncing a deployment pack" (copy-based `rsync` with `--dry-run`,
+  required `--exclude`, and a `diff -rq` parity check). ([#14], [#15])
+- **Dashboard model names are env-driven.** `ui/app.js` is now byte-identical
+  across deployments: the server injects the model-id → display-name map from
+  `MODEL_OVERRIDES_JSON` (`config.ui.modelOverrides`) at serve time, over the
+  `__MODEL_OVERRIDES__` marker. Defaults to the portable example-gateway names;
+  no provider identity lives in the static UI.
+- **`tests/models.test.js` is wired into `npm test`** (it existed but was never
+  run — now 344 tests, was 327).
+- **Pack-sync docs harden `--delete`**: preview with `--dry-run` first, and the
+  apply command always carries the pack-local exclude so a sync can never wipe
+  local-only build/deploy files.
+
+### Fixes
+- Vision agent `cwd` isolated to the screenshot temp dir (was inheriting the
+  app/review working directory — author-controlled images could reach source or
+  review artifacts); billable tokens from timed-out/failed/empty runs are
+  preserved in vision cost; temp-dir cleanup failures are logged, not silent.
+- A `fetchPrImages`=on run with `VISION_MODEL` unset now logs a transparent skip
+  warning instead of silently producing no screenshot block.
+
 ## v0.5.2 — 2026-11-18 — GLM-52 context declared truthfully (large-diff robustness)
 
 - **Corrected model context declaration in the container template.**
