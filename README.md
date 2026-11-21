@@ -307,9 +307,12 @@ routing lives in source either.
 Copy-based, one command — no patch or merge step:
 
 ```bash
-rsync --archive --delete <repo>/src/ <pack>/src/
-# optionally exclude pack-local files:
-# rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/
+# NOTE: `--delete` removes anything in the destination that is not in the
+# source. Preview with --dry-run first and keep pack-local paths excluded, so
+# a sync can never silently wipe local-only build/deploy files:
+rsync --archive --dry-run --delete <repo>/src/ <pack>/src/         # preview first
+rsync --archive --delete <repo>/src/ <pack>/src/                   # apply
+rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/
 ```
 
 Then verify source parity (the diff must be empty):
