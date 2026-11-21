@@ -186,8 +186,10 @@ agent** (`prompts/vision-base.md`, compiled to `.opencode/agents/pr-vision.md`)
 that gets the image attached via `--file`; it never reads the repo, and its
 routing/auth come entirely from the OpenCode provider config — application
 source carries no provider name, token env-var name, or gateway URL. The only
-vision knob is `VISION_MODEL`, an image-capable model id passed to the agent at
-run time, exactly like the reviewer/consensus models.
+knob that selects the vision provider/model is `VISION_MODEL`, an image-capable
+model id passed to the agent at run time, exactly like the reviewer/consensus
+models; the remaining `VISION_*` knobs are safety caps (image count, size, and
+timeout limits), never provider or token values.
 
 - `VISION_MODEL` must be **image-capable** (declare `capabilities.input` with
   `image` in the OpenCode config).
@@ -308,11 +310,10 @@ Copy-based, one command — no patch or merge step:
 
 ```bash
 # NOTE: `--delete` removes anything in the destination that is not in the
-# source. Preview with --dry-run first and keep pack-local paths excluded, so
-# a sync can never silently wipe local-only build/deploy files:
-rsync --archive --dry-run --delete <repo>/src/ <pack>/src/         # preview first
-rsync --archive --delete <repo>/src/ <pack>/src/                   # apply
-rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/
+# source. Always keep pack-local paths excluded, and preview with --dry-run
+# first, so a sync can never silently wipe local-only build/deploy files:
+rsync --archive --dry-run --delete <repo>/src/ <pack>/src/ --exclude local-only/   # preview
+rsync --archive --delete <repo>/src/ <pack>/src/ --exclude local-only/             # apply
 ```
 
 Then verify source parity (the diff must be empty):
