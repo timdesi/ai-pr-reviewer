@@ -17,7 +17,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
@@ -44,9 +44,14 @@ jobs:
 
       - name: Resolve the release tag (normalise dispatch input)
         id: tag
+        env:
+          # Dispatch inputs are user-controlled; pass through env, never
+          # interpolate into the script (script-injection hardening).
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            RAW="${{ github.event.inputs.tag }}"
+            RAW="$INPUT_TAG"
             [[ "$RAW" == v* ]] || RAW="v$RAW"
           else
             RAW="${GITHUB_REF#refs/tags/}"
@@ -55,8 +60,12 @@ jobs:
           git checkout --detach "refs/tags/${RAW}" 2>/dev/null \
             || { echo "::error::tag ${RAW} does not exist"; exit 1; }
           echo "tag=$RAW" >> "$GITHUB_OUTPUT"
-          echo "dry_run=${{ github.event.inputs.dry_run == 'true' || false }}" >> "$GITHUB_OUTPUT"
-          echo "Releasing $RAW${{ github.event.inputs.dry_run == 'true' && ' (DRY RUN — not publishing)' || '' }}"
+          echo "dry_run=${INPUT_DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
+          if [[ "${INPUT_DRY_RUN:-false}" == "true" ]]; then
+            echo "Releasing $RAW (DRY RUN — not publishing)"
+          else
+            echo "Releasing $RAW"
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -89,15 +98,19 @@ jobs:
           TGZ="$(ls ai-pr-reviewer-*.tgz | head -1)"
           rm -rf /tmp/release-scan && mkdir -p /tmp/release-scan
           tar -xzf "$TGZ" -C /tmp/release-scan
-          cd "$(find /tmp/release-scan -name package.json -not -path '*/node_modules/*' | head -1 | xargs dirname)"
+          # The tarball root is taken deterministically from the archive itself
+          # (the entry that owns a top-level package.json), not a find order.
+          ROOT="$(tar -tzf "$TGZ" | awk -F/ '$2=="package.json"{print $1; exit}')"
+          [[ -n "$ROOT" ]] || { echo "::error::no package.json in tarball"; exit 1; }
+          cd "/tmp/release-scan/$ROOT"
           # Single source of truth: reuse the ban list that .githooks/pre-push
           # enforces, rather than duplicating it here (which would itself trip
-          # the hook). Mirror the hook's exclusions: .githooks/ is excluded
-          # because the hook must carry the list to enforce it, and LICENSE is
-          # excluded because an MIT license names the copyright holder.
+          # the hook). Mirror the hook's matching: case-insensitive (-i) and
+          # exclusions (.githooks/ because the hook must carry the list,
+          # LICENSE because an MIT license names the copyright holder).
           BANNED="$(sed -n "s/^BANNED='\(.*\)'$/\1/p" .githooks/pre-push)"
           [[ -n "$BANNED" ]] || { echo "::error::could not read ban list from .githooks/pre-push"; exit 1; }
-          BAD="$(grep -RIlE --exclude-dir=.githooks --exclude=LICENSE "$BANNED" . 2>/dev/null || true)"
+          BAD="$(grep -RIliE --exclude-dir=.githooks --exclude=LICENSE "$BANNED" . 2>/dev/null || true)"
           if [[ -n "$BAD" ]]; then
             echo "::error::deployment identity found in tarball:"
             echo "$BAD"
