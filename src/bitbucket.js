@@ -10,6 +10,8 @@ import { bitbucketGovernor, parseRetryAfterHeader } from "./bitbucket-governor.j
 // are retried; the single POST write is never auto-retried (no duplicate
 // comments). A 429 pauses every client via the shared governor, so the retry
 // waits there rather than in a second local sleep (one window, not two).
+// Spacing is process-wide (min 200ms between starts, ~5 req/s ceiling) — an
+// intentional tradeoff to stay under Bitbucket DC limits, not a config knob.
 const BITBUCKET_MAX_ATTEMPTS = 3; // initial + 2 retries
 const BACKOFF_BASE_MS = 200;
 const BACKOFF_MAX_MS = 2_000;
@@ -122,8 +124,23 @@ export class BitbucketClient {
         throw networkErr; // rethrow the original error unchanged
       }
 
-      const text = await res.text();
-      if (res.ok) {
+      // Know the status BEFORE reading the body so a stream failure can still
+      // open the 429 breaker, respect the retry policy and keep the error shape.
+      const status = res.status;
+      const contentType = res.headers.get("content-type");
+      const retryAfterMs =
+        status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
+      if (status === 429) this.governor.noteRateLimited(retryAfterMs); // even non-retried writes open it
+
+      let text;
+      let bodyErr;
+      try {
+        text = await res.text();
+      } catch (err) {
+        bodyErr = err;
+      }
+
+      if (!bodyErr && res.ok) {
         this.governor.noteSuccess();
         if (raw) return text;
         if (!text) return null;
@@ -134,26 +151,21 @@ export class BitbucketClient {
         }
       }
 
-      const retryAfterMs =
-        res.status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
-      if (res.status === 429) this.governor.noteRateLimited(retryAfterMs); // even non-retried writes open it
-      const retryable =
-        isSafeRead(method) && isTransientStatus(res.status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1;
+      // A body-read failure is classified by the known status, not by the
+      // fetch catch: non-transient statuses are never retried, and 429 waits
+      // only via the breaker at the next acquire() (no second local sleep).
+      const retryable = isSafeRead(method) && isTransientStatus(status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1;
       if (retryable) {
-        // A 429 waits only via the breaker at the next acquire(); only 5xx
-        // uses a local jittered backoff. No stacked/double wait.
-        if (res.status !== 429) await this.sleep(computeBackoffMs(attempt));
+        if (status !== 429) await this.sleep(computeBackoffMs(attempt));
         continue;
       }
 
+      const detail = bodyErr ? "" : text;
       const err = new Error(
-        `Bitbucket ${method} ${pathname} failed: HTTP ${res.status} - ${trimErrorDetail(
-          text,
-          res.headers.get("content-type"),
-        )}`,
+        `Bitbucket ${method} ${pathname} failed: HTTP ${status} - ${trimErrorDetail(detail, contentType)}`,
       );
-      err.status = res.status;
-      err.body = text;
+      err.status = status;
+      err.body = detail;
       throw err;
     }
   }
@@ -176,7 +188,6 @@ export class BitbucketClient {
       // moment it is issued, burning a retry for no reason.
       let timer;
       let res;
-      let buf;
       let networkErr;
       try {
         await this.governor.acquire();
@@ -185,13 +196,14 @@ export class BitbucketClient {
           headers: { Authorization: `Bearer ${this.token}`, Accept: accept },
           signal: controller.signal,
         });
-        buf = Buffer.from(await res.arrayBuffer());
       } catch (err) {
         networkErr = err;
       } finally {
         clearTimeout(timer);
       }
       if (networkErr) {
+        // No response was obtained — a genuine acquire/fetch/network failure.
+        // Retry while attempts remain, exactly as before.
         if (attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
           await this.sleep(computeBackoffMs(attempt));
           continue;
@@ -199,25 +211,38 @@ export class BitbucketClient {
         throw networkErr;
       }
 
-      if (res.ok) {
-        this.governor.noteSuccess();
-        return { bytes: buf, contentType: res.headers.get("content-type") || "" };
-      }
+      // Status first: a 429 opens the shared breaker even when its body is
+      // unreadable, and a body-read failure is classified by this status.
+      const status = res.status;
+      const contentType = res.headers.get("content-type");
       const retryAfterMs =
-        res.status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
-      if (res.status === 429) this.governor.noteRateLimited(retryAfterMs);
-      if (isTransientStatus(res.status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
-        if (res.status !== 429) await this.sleep(computeBackoffMs(attempt));
+        status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
+      if (status === 429) this.governor.noteRateLimited(retryAfterMs);
+
+      let buf;
+      let bodyErr;
+      try {
+        buf = Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        bodyErr = err;
+      }
+
+      if (!bodyErr && res.ok) {
+        this.governor.noteSuccess();
+        return { bytes: buf, contentType: contentType || "" };
+      }
+
+      const retryable = isTransientStatus(status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1;
+      if (retryable) {
+        if (status !== 429) await this.sleep(computeBackoffMs(attempt));
         continue;
       }
-      const detail = buf.subarray(0, 200).toString();
+
+      const detail = bodyErr ? "" : buf.subarray(0, 200).toString();
       const err = new Error(
-        `Bitbucket GET ${pathname} failed: HTTP ${res.status} - ${trimErrorDetail(
-          detail,
-          res.headers.get("content-type"),
-        )}`,
+        `Bitbucket GET ${pathname} failed: HTTP ${status} - ${trimErrorDetail(detail, contentType)}`,
       );
-      err.status = res.status;
+      err.status = status;
       err.body = detail;
       throw err;
     }

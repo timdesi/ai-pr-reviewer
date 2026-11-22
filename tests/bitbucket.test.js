@@ -134,13 +134,14 @@ function makeClient(c) {
   return { gov, client };
 }
 
-function response({ status = 200, body = "", headers = {}, arrayBuffer } = {}) {
+function response({ status = 200, body = "", headers = {}, arrayBuffer, text } = {}) {
   const textBody = typeof body === "string" ? body : JSON.stringify(body);
   return {
     ok: status >= 200 && status < 300,
     status,
-    text: async () => textBody,
-    arrayBuffer: async () => arrayBuffer ?? Buffer.from(textBody),
+    text: text ?? (async () => textBody),
+    arrayBuffer: async () =>
+      typeof arrayBuffer === "function" ? arrayBuffer() : arrayBuffer ?? Buffer.from(textBody),
     headers: { get: (k) => headers[k.toLowerCase()] ?? headers[k] ?? null },
   };
 }
@@ -341,6 +342,55 @@ test("request(): a non-transient 404 is not retried and keeps err.status/err.bod
   }
 });
 
+test("request(): retries a safe GET when res.text() rejects once, then succeeds", async () => {
+  const c = fakeClock();
+  const { client } = makeClient(c);
+  const stub = stubFetch(
+    [
+      response({ status: 500, text: async () => { throw new Error("stream reset"); } }),
+      response({ body: { ok: true } }),
+    ],
+    c.now,
+  );
+  try {
+    assert.deepEqual(await client.request("/rest/x"), { ok: true });
+    assert.equal(stub.calls.length, 2, "a transient body-read failure is retried, not escaped");
+    assert.ok(c.sleeps.length >= 1, "the 5xx retry used local backoff");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("request(): a 429 with an unreadable body still opens the shared breaker", async () => {
+  const c = fakeClock();
+  const gov = new RequestGovernor({ now: c.now, sleep: c.sleep });
+  const a = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov });
+  const b = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov });
+  const stub = stubFetch(
+    [
+      response({ status: 429, headers: { "retry-after": "2" }, text: async () => { throw new Error("stream reset"); } }),
+      response({ body: { ok: true } }),
+    ],
+    c.now,
+  );
+  try {
+    await assert.rejects(
+      a.postPullRequestComment({ ...COMMENT_REF, text: "hi" }),
+      (err) => {
+        assert.equal(err.status, 429);
+        assert.equal(err.body, "", "an unreadable body is preserved best-effort as empty");
+        return true;
+      },
+    );
+    assert.equal(stub.calls.length, 1, "a write is issued once even when the 429 body cannot be read");
+    assert.equal(gov.getState().pauseUntil, 2000, "an unreadable 429 still opened the shared breaker");
+    await b.request("/rest/after");
+    assert.equal(stub.calls[1].at, 2000, "the second client waited out the shared pause");
+  } finally {
+    stub.restore();
+  }
+});
+
 test("getAllPages(): every page is paced and a transient 429 on page 2 is retried without losing page 1", async () => {
   const c = fakeClock();
   const { client } = makeClient(c);
@@ -405,6 +455,73 @@ test("fetchBuffer(): is paced, breaker-aware, retries with a fresh abort signal,
     assert.equal(stub2.calls.length, 3);
   } finally {
     stub2.restore();
+  }
+});
+
+test("fetchBuffer(): retries when res.arrayBuffer() rejects once, then succeeds", async () => {
+  const c = fakeClock();
+  const { client } = makeClient(c);
+  const bytes = Buffer.from([1, 2, 3]);
+  const stub = stubFetch(
+    [
+      response({ status: 500, arrayBuffer: async () => { throw new Error("stream reset"); } }),
+      response({ headers: { "content-type": "image/png" }, arrayBuffer: bytes }),
+    ],
+    c.now,
+  );
+  try {
+    const out = await client.fetchBuffer("/rest/img");
+    assert.deepEqual(out.bytes, bytes);
+    assert.equal(out.contentType, "image/png");
+    assert.equal(stub.calls.length, 2, "a transient body-read failure is retried");
+    assert.notEqual(stub.calls[0].signal, stub.calls[1].signal, "a fresh AbortController per attempt");
+    assert.ok(c.sleeps.length >= 1, "the 5xx retry used local backoff");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("fetchBuffer(): a 429 with an unreadable body opens the shared breaker and keeps status", async () => {
+  const c = fakeClock();
+  const gov = new RequestGovernor({ now: c.now, sleep: c.sleep });
+  const client = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov });
+  const stub = stubFetch(
+    () => response({
+      status: 429,
+      headers: { "retry-after": "2" },
+      arrayBuffer: async () => { throw new Error("stream reset"); },
+    }),
+    c.now,
+  );
+  try {
+    await assert.rejects(client.fetchBuffer("/rest/img"), (err) => {
+      assert.equal(err.status, 429);
+      assert.equal(err.body, "", "an unreadable body is preserved best-effort as empty");
+      return true;
+    });
+    assert.equal(stub.calls.length, 3, "all attempts used, waiting via the breaker between each");
+    assert.ok(gov.getState().pauseUntil > 0, "an unreadable 429 still opened the shared breaker");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("fetchBuffer(): a non-transient status with an unreadable body is not retried", async () => {
+  const c = fakeClock();
+  const { client } = makeClient(c);
+  const stub = stubFetch(
+    () => response({ status: 404, arrayBuffer: async () => { throw new Error("stream reset"); } }),
+    c.now,
+  );
+  try {
+    await assert.rejects(client.fetchBuffer("/rest/img"), (err) => {
+      assert.equal(err.status, 404);
+      assert.equal(err.body, "", "an unreadable body is preserved best-effort as empty");
+      return true;
+    });
+    assert.equal(stub.calls.length, 1, "a non-transient status is never retried on a body-read failure");
+  } finally {
+    stub.restore();
   }
 });
 
