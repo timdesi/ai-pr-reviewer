@@ -38,7 +38,7 @@ import path from "node:path";
 import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
 import { runReview, listJobsPage, finalizeStaleJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
-import { listPulls, clearPullCache } from "./pulls.js";
+import { listPulls, clearPullCacheEntry } from "./pulls.js";
 import { computeStats } from "./stats.js";
 import { parseWebhookRequest, verifySignature, isUnsignedDiagnostic, isForceReview } from "./webhook.js";
 import { parseGitHubWebhookRequest } from "./webhook-github.js";
@@ -303,9 +303,11 @@ export function createServer({ config, port = config.server.port, host = config.
           if (evt.type === "job-ready") state.runningJob = evt.jobName;
           if (evt.type === "complete" || evt.type === "error") {
             const done = { ...evt };
-            // A review finished → force a fresh head/new-commits lookup for that
-            // PR (the remembered reviewed SHA may now be behind the head).
-            clearPullCache();
+            // A review finished → force a fresh head/new-commits lookup for
+            // only the PR that just finished (the remembered reviewed SHA may
+            // now be behind the head). next.ref is captured lexically here and
+            // is never mutated; done/activeRef carry no ref (or are nulled).
+            clearPullCacheEntry(next.ref);
             setTimeout(() => {
               if (state.runningJob === done.job || state.runningJob === "starting") {
                 state.runningJob = null;

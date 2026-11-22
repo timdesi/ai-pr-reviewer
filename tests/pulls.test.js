@@ -52,6 +52,9 @@ function fakeClient({ heads = {}, prCommits = {}, branches = {}, meta = {} }) {
         );
       }
       if (sha === "ERR") throw new Error("network down");
+      if (sha === "429") {
+        throw Object.assign(new Error("Bitbucket GET failed: HTTP 429 - Too many requests"), { status: 429 });
+      }
       const b = branches[keyOf(ref)] || {};
       const m = meta[keyOf(ref)] || {};
       return {
@@ -410,4 +413,145 @@ test("PRs that 404 in Bitbucket (deleted after merge/decline) are notFound + unr
   assert.equal(p.state, null, "no state was returned for the purged PR");
   assert.equal(p.stale, null, "no head to compare → unknown staleness");
   assert.match(p.headError, /does not exist/i);
+});
+
+test("listPulls: default concurrency bounds parallel head fetches to 2 for 4 PRs", async () => {
+  clearPullCache();
+  const cfg = freshCfg();
+  const refs = [5701, 5702, 5703, 5704].map((prId) => ({ projectKey: "ACME", repoSlug: "acme-app", prId }));
+  refs.forEach((ref, i) =>
+    makeJobDir(cfg.dirs.jobs, `PR${ref.prId}`, {
+      ref,
+      reviewedSha: "aaa11111",
+      startedAt: `2026-10-20T09:00:0${i}.000Z`,
+      title: `PR #${ref.prId}`,
+    }),
+  );
+  let active = 0;
+  let maxActive = 0;
+  const client = {
+    async getPullRequestRefs() {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 10));
+      active--;
+      return { headSha: "bbb22222", branch: "f", targetBranch: "master", author: null, state: "OPEN", closed: false };
+    },
+    async getPullRequestCommits() {
+      return [];
+    },
+  };
+
+  await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  assert.equal(maxActive, 2, "the default must cap parallel head lookups at 2");
+  assert.equal(refs.length, 4);
+});
+
+test("listPulls: a 429 head lookup is cached for the TTL and not refetched by the next poller", async () => {
+  clearPullCache();
+  const cfg = freshCfg();
+  const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5710 };
+  makeJobDir(cfg.dirs.jobs, "PR5710", {
+    ref,
+    reviewedSha: "aaa11111",
+    startedAt: "2026-10-20T09:00:00.000Z",
+    title: "PR #5710",
+  });
+  const client = fakeClient({ heads: { "ACME/acme-app#5710": "429" } });
+
+  const first = await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  const second = await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  assert.equal(client.calls.head.length, 1, "the failed 429 lookup stays cached for the full TTL");
+  for (const out of [first, second]) {
+    assert.match(out.pulls[0].headError, /HTTP 429/);
+    assert.equal(out.pulls[0].stale, null, "unknown head → unknown staleness");
+  }
+});
+
+test("clearPullCacheEntry(ref): invalidates only that PR's headCache and inflight entries", async () => {
+  const { clearPullCacheEntry } = await import("../src/pulls.js");
+  clearPullCache();
+  const cfg = freshCfg();
+  const refA = { projectKey: "ACME", repoSlug: "acme-app", prId: 5720 };
+  const refB = { projectKey: "ACME", repoSlug: "acme-app", prId: 5721 };
+  for (const ref of [refA, refB]) {
+    makeJobDir(cfg.dirs.jobs, `PR${ref.prId}`, {
+      ref,
+      reviewedSha: "aaa11111",
+      startedAt: "2026-10-20T09:00:00.000Z",
+      title: `PR #${ref.prId}`,
+    });
+  }
+  const client = fakeClient({
+    heads: { "ACME/acme-app#5720": "aaa11111", "ACME/acme-app#5721": "bbb22222" },
+  });
+
+  await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  assert.equal(client.calls.head.length, 2, "both PRs fetched once");
+
+  clearPullCacheEntry(refA);
+  await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  assert.equal(client.calls.head.filter((r) => r.prId === 5720).length, 2, "PR A refetched");
+  assert.equal(client.calls.head.filter((r) => r.prId === 5721).length, 1, "PR B stayed cached");
+});
+
+test("clearPullCacheEntry(ref): a stale in-flight fetch cannot repopulate the invalidated entry", async () => {
+  const { clearPullCacheEntry } = await import("../src/pulls.js");
+  clearPullCache();
+  const cfg = freshCfg();
+  const ref = { projectKey: "ACME", repoSlug: "acme-app", prId: 5730 };
+  makeJobDir(cfg.dirs.jobs, "PR5730", {
+    ref,
+    reviewedSha: "aaa11111",
+    startedAt: "2026-10-20T09:00:00.000Z",
+    title: "PR #5730",
+  });
+  // Two INDEPENDENT gates so we control which fetch's .then (cache write)
+  // settles last. The stale fetch must settle AFTER the fresh one, otherwise
+  // registration order alone makes the fresh write win and the test would pass
+  // even with the generation guard removed.
+  let releaseStale = null;
+  let releaseFresh = null;
+  const staleGate = new Promise((r) => (releaseStale = r));
+  const freshGate = new Promise((r) => (releaseFresh = r));
+  let headCalls = 0;
+  const client = {
+    async getPullRequestRefs() {
+      const n = ++headCalls;
+      await (n === 1 ? staleGate : freshGate);
+      // Capture the head value BEFORE awaiting the gate. Reading headCalls
+      // afterwards sees 2 for both fetches and makes "stale-sha" dead code.
+      const headSha = n === 1 ? "stale-sha" : "fresh-sha";
+      return { headSha, branch: "f", targetBranch: "master", author: null, state: "OPEN", closed: false };
+    },
+    async getPullRequestCommits() {
+      return [];
+    },
+  };
+  const settle = () => new Promise((r) => setImmediate(r));
+
+  // Caller 1 starts the stale fetch and stays in flight.
+  const pStale = listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  await settle();
+  assert.equal(headCalls, 1, "the stale fetch is in flight");
+
+  clearPullCacheEntry(ref); // review completes mid-flight
+  const pFresh = listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  await settle();
+  assert.equal(headCalls, 2, "a fresh fetch started after invalidation");
+
+  // Settle the FRESH fetch first so its head lands in the cache, then the stale
+  // one. The stale .then must be suppressed by the generation guard.
+  releaseFresh();
+  await settle();
+  releaseStale();
+  const [a, b] = await Promise.all([pStale, pFresh]);
+
+  // Distinct, real values: the stale fetch genuinely returned a different head.
+  assert.equal(a.pulls[0].headSha, "stale-sha", "the stale fetch returned the old head");
+  assert.equal(b.pulls[0].headSha, "fresh-sha", "the fresh fetch returned the new head");
+
+  const third = await listPulls(cfg, { client, live: true, ttlMs: 600_000 });
+  assert.equal(headCalls, 2, "the fresh result is cached; the stale settle did not reopen the entry");
+  assert.equal(third.pulls[0].headSha, "fresh-sha", "the invalidated key holds the post-completion head");
 });

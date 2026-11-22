@@ -23,15 +23,31 @@ import { log } from "./log.js";
 // Stage names that mean a review is still in flight for this PR.
 const RUNNING = new Set(["fetch", "review", "consensus", "render", "publish"]);
 const HEAD_TTL_MS = 60_000;
+// Bounded dashboard fan-out: a full re-fetch every TTL must not burst the
+// Bitbucket rate limit. Callers may still override this per call.
+const DEFAULT_PULL_CONCURRENCY = 2;
 
 // ref-key -> { ts, res: { headSha, stale, newCommits } }
 const headCache = new Map();
 // ref-key -> pending enrichment promise for that PR (in-flight coalescing).
 const inflight = new Map();
+// ref-key -> generation counter. A targeted invalidation bumps it so a fetch
+// that was already in flight cannot repopulate the freshly invalidated key.
+const headGen = new Map();
 
 export function clearPullCache() {
   headCache.clear();
   inflight.clear();
+  headGen.clear(); // full reset (tests / future callers)
+}
+
+/** Invalidate only the given PR's cached/in-flight head state (review done). */
+export function clearPullCacheEntry(ref) {
+  const key = keyOf(ref);
+  if (!key) return;
+  headCache.delete(key);
+  inflight.delete(key);
+  headGen.set(key, (headGen.get(key) || 0) + 1);
 }
 
 export function keyOf(ref) {
@@ -197,8 +213,12 @@ async function enrichOne(pull, client, { ttlMs }) {
   // Do the fetch + cache write inside a single promise so every waiter gets the
   // same result. The result (including a failed/429 lookup) stays cached for
   // TTL, so a rate-limited batch is not re-fetched by every poller.
+  // A review completion can invalidate this key while the fetch is in flight;
+  // only write the cache if the generation has not changed since we started.
+  // applyHead still runs for this caller: it only mutates this poll's own pull.
+  const gen = headGen.get(pull.key) || 0;
   const fetching = fetchHeadState(client, pull).then((res) => {
-    headCache.set(pull.key, { ts: Date.now(), res });
+    if ((headGen.get(pull.key) || 0) === gen) headCache.set(pull.key, { ts: Date.now(), res });
     applyHead(pull, res);
     return res;
   });
@@ -211,8 +231,8 @@ async function enrichOne(pull, client, { ttlMs }) {
   } catch (err) {
     log.warn(`pulls: unexpected enrichment failure for ${pull.key}: ${err?.message || err}`);
   } finally {
-    // A review completion can clearPullCache() while this fetch is still in
-    // flight; a newer caller may then have installed a fresh entry for the same
+    // A review completion can clearPullCacheEntry(next.ref) while this fetch is
+    // still in flight; a newer caller may then have installed a fresh entry for the same
     // PR. Delete the entry only if it is still ours, so a stale settle cannot
     // evict a newer in-flight promise (and reopen the duplicate-request window).
     if (inflight.get(pull.key) === guarded) inflight.delete(pull.key);
@@ -287,7 +307,7 @@ async function enrich(pulls, client, { ttlMs, concurrency }) {
  */
 export async function listPulls(
   config,
-  { client, clients, live = true, ttlMs = HEAD_TTL_MS, concurrency = 4 } = {},
+  { client, clients, live = true, ttlMs = HEAD_TTL_MS, concurrency = DEFAULT_PULL_CONCURRENCY } = {},
 ) {
   const pulls = buildPullMap(listJobs(config), config);
   const anyClient = !!client || (!!clients && Object.keys(clients).length > 0);

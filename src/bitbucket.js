@@ -4,15 +4,81 @@
 // TLS:  set BITBUCKET verifyTls=false to accept self-signed/internal CAs.
 
 import { log } from "./log.js";
+import { bitbucketGovernor, parseRetryAfterHeader } from "./bitbucket-governor.js";
+
+// Retry policy — internal constants, no config/env surface. Only safe reads
+// are retried; the single POST write is never auto-retried (no duplicate
+// comments). A 429 pauses every client via the shared governor, so the retry
+// waits there rather than in a second local sleep (one window, not two).
+const BITBUCKET_MAX_ATTEMPTS = 3; // initial + 2 retries
+const BACKOFF_BASE_MS = 200;
+const BACKOFF_MAX_MS = 2_000;
+const JITTER_RATIO = 0.2;
+const DETAIL_MAX_CHARS = 200;
+const HTML_TITLE_MAX_CHARS = 160;
+
+function isSafeRead(method) {
+  return method === "GET" || method === "HEAD";
+}
+
+function isTransientStatus(status) {
+  return status === 429 || status >= 500;
+}
+
+/** Capped exponential backoff with a +/-20% jitter band. */
+function computeBackoffMs(attempt, random = Math.random) {
+  const cap = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
+  return Math.round(cap * (1 - JITTER_RATIO + random() * 2 * JITTER_RATIO));
+}
+
+/**
+ * Keep raw HTML out of error messages (and therefore out of logs) while
+ * preserving the useful title. Everything else keeps the JSON
+ * `errors[0].message` extraction and is truncated to a bounded length.
+ * Consumers still get the untouched raw text via `err.body`.
+ */
+function trimErrorDetail(text, contentType) {
+  const raw = String(text ?? "");
+  const ct = String(contentType ?? "");
+  const leading = raw.trimStart();
+  if (/\bhtml\b/i.test(ct) || /^<!doctype|^<html|^<title/i.test(leading)) {
+    const match = leading.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (!match) return "HTML body omitted";
+    let title = match[1]
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!title) return "HTML body omitted";
+    if (title.length > HTML_TITLE_MAX_CHARS) title = `${title.slice(0, HTML_TITLE_MAX_CHARS - 1)}…`;
+    return title;
+  }
+  let detail = raw;
+  try {
+    detail = JSON.parse(raw)?.errors?.[0]?.message || raw;
+  } catch {
+    /* keep raw text */
+  }
+  if (detail.length > DETAIL_MAX_CHARS) return `${detail.slice(0, DETAIL_MAX_CHARS - 1)}…`;
+  return detail;
+}
 
 export class BitbucketClient {
-  constructor({ baseUrl, token, username, verifyTls = true }) {
+  constructor({ baseUrl, token, username, verifyTls = true, governor = bitbucketGovernor, sleep = governor.sleep } = {}) {
     if (!baseUrl) throw new Error("BitbucketClient: baseUrl is required");
     if (!token) throw new Error("BitbucketClient: token is required");
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
     this.username = username || "";
     this.verifyTls = verifyTls !== false;
+    // One clock: request/fetchBuffer backoff uses this.sleep, which defaults to
+    // the injected governor's sleep. Tests inject a single fake-clock governor
+    // and don't pass a second sleep, so spacing, breaker and backoff agree.
+    this.governor = governor;
+    this.sleep = sleep;
     if (!this.verifyTls) {
       // Global fetch (undici) honors this at TLS connect time.
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -27,36 +93,68 @@ export class BitbucketClient {
 
   async request(pathname, { accept = "application/json", method = "GET", body, headers = {}, raw = false } = {}) {
     const url = this.url(pathname);
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: accept,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...headers,
-      },
-      ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
-    });
-
-    const text = await res.text();
-    if (!res.ok) {
-      let detail = text;
+    for (let attempt = 0; attempt < BITBUCKET_MAX_ATTEMPTS; attempt++) {
+      let res;
+      let networkErr;
       try {
-        detail = JSON.parse(text)?.errors?.[0]?.message || text;
-      } catch {
-        /* keep raw text */
+        // Every request (including each retry) is paced and held by the shared
+        // process-wide breaker. getAllPages needs no changes: each page calls
+        // request(), so pagination is covered here too.
+        await this.governor.acquire();
+        res = await fetch(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: accept,
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+            ...headers,
+          },
+          ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
+        });
+      } catch (err) {
+        networkErr = err;
       }
-      const err = new Error(`Bitbucket ${method} ${pathname} failed: HTTP ${res.status} - ${detail}`);
+      if (networkErr) {
+        if (isSafeRead(method) && attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
+          await this.sleep(computeBackoffMs(attempt));
+          continue;
+        }
+        throw networkErr; // rethrow the original error unchanged
+      }
+
+      const text = await res.text();
+      if (res.ok) {
+        this.governor.noteSuccess();
+        if (raw) return text;
+        if (!text) return null;
+        try {
+          return JSON.parse(text);
+        } catch {
+          return text;
+        }
+      }
+
+      const retryAfterMs =
+        res.status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
+      if (res.status === 429) this.governor.noteRateLimited(retryAfterMs); // even non-retried writes open it
+      const retryable =
+        isSafeRead(method) && isTransientStatus(res.status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1;
+      if (retryable) {
+        // A 429 waits only via the breaker at the next acquire(); only 5xx
+        // uses a local jittered backoff. No stacked/double wait.
+        if (res.status !== 429) await this.sleep(computeBackoffMs(attempt));
+        continue;
+      }
+
+      const err = new Error(
+        `Bitbucket ${method} ${pathname} failed: HTTP ${res.status} - ${trimErrorDetail(
+          text,
+          res.headers.get("content-type"),
+        )}`,
+      );
       err.status = res.status;
       err.body = text;
       throw err;
-    }
-    if (raw) return text;
-    if (!text) return null;
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
     }
   }
 
@@ -68,27 +166,68 @@ export class BitbucketClient {
    */
   async fetchBuffer(pathname, { accept = "image/png,image/jpeg,image/gif,image/webp,*/*", timeoutMs = 30000 } = {}) {
     const url = this.url(pathname);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.token}`, Accept: accept },
-        signal: controller.signal,
-      });
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (!res.ok) {
-        const err = new Error(`Bitbucket GET ${pathname} failed: HTTP ${res.status}`);
-        err.status = res.status;
-        err.body = buf.subarray(0, 200).toString();
-        throw err;
+    for (let attempt = 0; attempt < BITBUCKET_MAX_ATTEMPTS; attempt++) {
+      // A fresh controller per attempt: an aborted attempt must not poison its
+      // retries (a reused controller would make every retry abort instantly).
+      const controller = new AbortController();
+      // Arm the deadline only AFTER the governor grants the request. Under a
+      // 429 storm acquire() may sleep for the breaker's Retry-After window
+      // (up to 30s); a timer armed before that wait would abort the fetch the
+      // moment it is issued, burning a retry for no reason.
+      let timer;
+      let res;
+      let buf;
+      let networkErr;
+      try {
+        await this.governor.acquire();
+        timer = setTimeout(() => controller.abort(), timeoutMs);
+        res = await fetch(url, {
+          headers: { Authorization: `Bearer ${this.token}`, Accept: accept },
+          signal: controller.signal,
+        });
+        buf = Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        networkErr = err;
+      } finally {
+        clearTimeout(timer);
       }
-      return { bytes: buf, contentType: res.headers.get("content-type") || "" };
-    } finally {
-      clearTimeout(timer);
+      if (networkErr) {
+        if (attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
+          await this.sleep(computeBackoffMs(attempt));
+          continue;
+        }
+        throw networkErr;
+      }
+
+      if (res.ok) {
+        this.governor.noteSuccess();
+        return { bytes: buf, contentType: res.headers.get("content-type") || "" };
+      }
+      const retryAfterMs =
+        res.status === 429 ? parseRetryAfterHeader(res.headers.get("retry-after"), this.governor.now()) : null;
+      if (res.status === 429) this.governor.noteRateLimited(retryAfterMs);
+      if (isTransientStatus(res.status) && attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
+        if (res.status !== 429) await this.sleep(computeBackoffMs(attempt));
+        continue;
+      }
+      const detail = buf.subarray(0, 200).toString();
+      const err = new Error(
+        `Bitbucket GET ${pathname} failed: HTTP ${res.status} - ${trimErrorDetail(
+          detail,
+          res.headers.get("content-type"),
+        )}`,
+      );
+      err.status = res.status;
+      err.body = detail;
+      throw err;
     }
   }
 
-  /** Follow Bitbucket's `values`/`isLastPage`/`nextPageStart` pagination. */
+  /**
+   * Follow Bitbucket's `values`/`isLastPage`/`nextPageStart` pagination.
+   * No explicit pacing here: every page goes through request(), so each page
+   * is individually paced and breaker-aware by the shared governor.
+   */
   async getAllPages(pathname, { limit = 100, accept } = {}) {
     const sep = pathname.includes("?") ? "&" : "?";
     let next = `${pathname}${sep}limit=${limit}`;
