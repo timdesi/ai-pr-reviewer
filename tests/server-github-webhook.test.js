@@ -6,8 +6,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { createHmac } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -254,5 +255,78 @@ test("static UI app.js: display names with $ sequences are injected verbatim, no
     const val = new Function(`${seg}\nreturn JSON.stringify(MODEL_OVERRIDES);`)();
     assert.equal(JSON.parse(val)["acme-gpt/gpt-6-luna"], "GPT $LUNA & $& $1");
   });
+});
+
+// ESM imports cannot be spied, so the only honest proof that server.js calls
+// clearPullCacheEntry(next.ref) (not a global flush) is end-to-end: two PRs
+// cached via /api/pulls?live=1, one review completion emitted, then a second
+// poll that must refetch only the completed PR.
+test("review completion invalidates only the completed PR's pull cache", async () => {
+  const refCounts = new Map();
+  const bb = http.createServer((req, res) => {
+    const p = req.url.split("?")[0];
+    refCounts.set(p, (refCounts.get(p) || 0) + 1);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (p.endsWith("/commits")) {
+      res.end(JSON.stringify({ values: [{ id: "newsha", message: "m", committerTimestamp: 1 }], isLastPage: true }));
+    } else {
+      res.end(
+        JSON.stringify({
+          state: "OPEN",
+          fromRef: { latestCommit: "newsha", displayId: "feature" },
+          toRef: { displayId: "master" },
+          author: { displayName: "Ada" },
+        }),
+      );
+    }
+  });
+  await new Promise((r) => bb.listen(0, "127.0.0.1", r));
+  try {
+    const baseUrl = `http://127.0.0.1:${bb.address().port}`;
+    const jobsDir = mkdtempSync(path.join(tmpdir(), "pull-invalidate-"));
+    const refs = [
+      { projectKey: "ACME", repoSlug: "acme-app", prId: 5720, platform: "bitbucket" },
+      { projectKey: "ACME", repoSlug: "acme-app", prId: 5721, platform: "bitbucket" },
+    ];
+    for (const ref of refs) {
+      const dir = path.join(jobsDir, `job-${ref.prId}`);
+      mkdirSync(dir, { recursive: true });
+      const meta = { ref, reviewedSha: "oldsha", startedAt: "2026-10-20T09:00:00.000Z", title: `PR #${ref.prId}` };
+      writeFileSync(path.join(dir, "job-meta.json"), JSON.stringify(meta));
+      writeFileSync(path.join(dir, "status.json"), JSON.stringify({ job: `job-${ref.prId}`, ...meta, stage: "complete" }));
+    }
+    const config = baseConfig({ dirs: { jobs: jobsDir }, bitbucket: { baseUrl, token: "t", username: "" } });
+    let emit = null;
+    const reviewRunner = async ({ options }) => {
+      emit = options.emit;
+    };
+    const aPath = "/rest/api/1.0/projects/ACME/repos/acme-app/pull-requests/5720";
+    const bPath = "/rest/api/1.0/projects/ACME/repos/acme-app/pull-requests/5721";
+
+    await withServer({ config, reviewRunner }, async (port) => {
+      const root = `http://127.0.0.1:${port}`;
+      const startRes = await fetch(`${root}/api/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pr: "ACME/acme-app#5720" }),
+      });
+      assert.equal(startRes.status, 202, "review start must be accepted");
+      assert.ok(emit, "fake runner captured the completion emitter");
+
+      const first = await fetch(`${root}/api/pulls?live=1`).then((r) => r.json());
+      assert.equal(first.live, true);
+      assert.equal(first.pulls.length, 2);
+      const aBefore = refCounts.get(aPath) || 0;
+      const bBefore = refCounts.get(bPath) || 0;
+
+      emit({ type: "complete", job: "job-5720" }); // "complete", not "completed"
+
+      await fetch(`${root}/api/pulls?live=1`);
+      assert.equal(refCounts.get(aPath) || 0, aBefore + 1, "only PR A was refetched after its review completed");
+      assert.equal(refCounts.get(bPath) || 0, bBefore, "PR B stayed cached");
+    });
+  } finally {
+    await new Promise((r) => bb.close(r));
+  }
 });
 
