@@ -10,6 +10,30 @@ below the `v0.2.x` entries.
 
 ---
 
+## v0.5.7 — 2026-11-22 — Bitbucket 429 storm: process-wide governor (pace + circuit-breaker + retry)
+
+- **429 storms (and the Bitbucket body-read failures they cause) are now handled
+  at the process level, not per client.** New `src/bitbucket-governor.js`
+  singleton spaces every Bitbucket HTTP request (`MIN_SPACING_MS=200`), opens a
+  shared **circuit-breaker** on 429 (2s→30s capped exponential backoff, honoring
+  `Retry-After` up to 30s), and `BitbucketClient` retries **safe-read**
+  requests on transient status (429 / ≥500) with ±20% jittered backoff and a
+  known-status body-read-failure retry path — so `/api/pulls` polling and
+  review fetches stop hammering the API during rate-limit windows.
+- **Breaker state is deliberately process-wide with no env/config surface**
+  (constants only): transient 429s are systemic, not per-request, so throttling
+  and blocking belong to one singleton. Tests inject a fake-clock governor.
+- **Added `tests/bitbucket.test.js`** (591 lines: pacing, breaker, Retry-After,
+  body-read failure, retry policy) + expanded `tests/pulls.test.js` /
+  `tests/server-github-webhook.test.js`. Suite now covers the governor
+  end-to-end.
+
+### Notable
+- The release pipeline harden from 0.5.6 (GNU-tar SIGPIPE guard via `sort -u`)
+  is unchanged; `release.yml`/`package.json` are otherwise untouched by this PR.
+
+---
+
 ## v0.5.6 — 2026-11-21 — Zero-divergence release + env-driven dashboard model names
 
 - **Vision transcription is now an OpenCode agent (`pr-vision`), not a bespoke
