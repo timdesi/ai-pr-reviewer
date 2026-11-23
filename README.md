@@ -357,6 +357,7 @@ tests/      unit and integration tests
 | Resource | Description |
 |---|---|
 | [Usage guide](docs/ai-pr-reviewer-usage-guide.md) | The full operator guide |
+| [Team onboarding (Bitbucket)](docs/ai-pr-reviewer-onboarding-bitbucket.md) | Quick start for adding a team's repositories |
 | [Cheat sheet](docs/ai-pr-reviewer-cheatsheet.md) | One page: triggers, verdicts, config, troubleshooting |
 | [Architecture](docs/ai-bitbucket-pr-reviewer-architecture.md) | Design and decisions |
 | [Changelog](CHANGELOG.md) | Release history |
