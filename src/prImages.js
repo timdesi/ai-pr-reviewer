@@ -243,18 +243,24 @@ export async function transcribeViaAgent({
 
 /**
  * Sweep stale per-image scratch dirs out of `dirs.visionScratch` (best-effort,
- * never throws). Each transcription's temp dir lives at most one call-timeout
- * window, so a sweep only ever removes dirs older than the configured
- * `review.visionScratchMaxAgeMs` — floored at two call timeouts so a
- * misconfigured tiny value can never delete a concurrent review's live dir.
- * Returns the number of dirs removed. `maxAgeMs` <= 0 disables the sweep.
+ * never throws). Each transcription's temp dir is live for at most one
+ * call-timeout window, so a sweep only ever removes dirs older than the
+ * configured `review.visionScratchMaxAgeMs` — floored at two call timeouts AND
+ * an absolute safety floor (the app's default call timeout, 60 s), whichever is
+ * larger, so even a misconfigured tiny age/timeout can never touch a concurrent
+ * review's live dir. Returns the number of dirs removed. `maxAgeMs` <= 0
+ * disables the sweep.
  */
 export async function sweepVisionScratch(config) {
   const scratchRoot = config.dirs?.visionScratch || os.tmpdir();
   const maxAge = Number(config.review?.visionScratchMaxAgeMs) || 0;
   if (!(maxAge > 0)) return 0;
   const callTimeout = Number(config.review?.visionCallTimeoutMs) || 60000;
-  const age = Math.max(maxAge, 2 * callTimeout);
+  // `2 * callTimeout` alone is only trustworthy when callTimeout is a sane
+  // value — with a misconfigured tiny timeout the floor could drop to seconds.
+  // The floor is also at least the app's default call timeout (60 s), so a live
+  // dir is never younger than a minute and no concurrent review can be swept.
+  const age = Math.max(maxAge, 2 * callTimeout, 60_000);
   let entries = [];
   try {
     entries = await fs.readdir(scratchRoot, { withFileTypes: true });
@@ -361,6 +367,10 @@ export async function loadScreenshotBlock({
       }
       // Accept both the structured envelope `{ ok, text, usage, stdout, stderr,
       // error }` (from transcribeViaAgent) and a plain string caption (tests).
+      // A pre-flight skip (transcribe returns null — nothing attempted, e.g. an
+      // invalid model) still yields a record, but its error must say *why*
+      // instead of falling through to the pipeline's generic "no caption"
+      // fallback (AI review minor).
       const caption = structured ? res.text : res;
       const record = {
         index,
@@ -371,7 +381,7 @@ export async function loadScreenshotBlock({
         usage: u,
         stdout: structured && res.stdout ? res.stdout : "",
         stderr: structured && res.stderr ? res.stderr : "",
-        error: structured && res.error ? res.error : null,
+        error: structured ? (res.error ?? null) : res === null ? "transcription skipped (no attempt)" : null,
       };
       images.push(record);
       if (!record.ok) {

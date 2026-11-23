@@ -440,6 +440,23 @@ test("loadScreenshotBlock: structured fail envelope (stderr) lands in the image 
   assert.deepEqual(res.images[0].usage, { input: 5, output: 2 }, "failed run still priced");
 });
 
+test("loadScreenshotBlock: transcribe pre-flight skip (null) records the real reason, not 'no caption'", async () => {
+  const fetchBuffer = async () => ({ bytes: Buffer.from("x"), contentType: "image/png" });
+  const client = { fetchBuffer };
+  const res = await loadScreenshotBlock({
+    client,
+    config: baseConfig,
+    ref,
+    description: "![a](attachment:1/7)",
+    activities: [],
+    transcribe: async () => null, // nothing attempted (e.g. invalid model id)
+  });
+  assert.equal(res.unreadable, 1, "a skip still counts as unreadable");
+  assert.equal(res.images.length, 1);
+  assert.equal(res.images[0].ok, false);
+  assert.equal(res.images[0].error, "transcription skipped (no attempt)", "artifact carries the real reason, not the generic 'no caption' fallback");
+});
+
 // --- sweepVisionScratch ------------------------------------------------------
 
 function scratchCfg({ maxAge, callTimeout, dir }) {
@@ -475,6 +492,17 @@ test("sweepVisionScratch: removes only dirs older than the age floor", async () 
   assert.ok(!(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-edge").catch(() => null)));
   assert.ok(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-fresh"));
   assert.ok(await fs.stat(cfg.dirs.visionScratch + "/not-a-vision-dir"));
+  await fs.rm(cfg.dirs.visionScratch, { recursive: true, force: true });
+});
+
+test("sweepVisionScratch: absolute 60s floor protects live dirs even with tiny maxAge+timeout", async () => {
+  // Misconfigured tiny values: 2*callTimeout = 1s, but the absolute floor keeps a
+  // 20s-old dir — a live concurrent transcription — untouched (never swept).
+  const cfg = scratchCfg({ maxAge: 1000, callTimeout: 500 });
+  await makeScratchDir(cfg, "pr-vision-live", Date.now() - 20_000);
+  assert.equal(await sweepVisionScratch(cfg), 0, "60s absolute floor beats the tiny 2*timeout floor");
+  const fs = await import("node:fs/promises");
+  assert.ok(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-live"));
   await fs.rm(cfg.dirs.visionScratch, { recursive: true, force: true });
 });
 

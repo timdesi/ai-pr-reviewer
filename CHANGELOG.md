@@ -32,8 +32,9 @@ below the `v0.2.x` entries.
   automatically.
 - **Crash leftovers can't accumulate.** A best-effort `sweepVisionScratch`
   removes `pr-vision-*` subdirs older than `VISION_SCRATCH_MAX_AGE_MS` (default
-  1 h, floored at two call timeouts so it never touches a concurrent review's
-  live dir), closing the disk-hygiene gap for a SIGKILLed transcription.
+  1 h, floored at two call timeouts and an absolute 60 s so it never touches a
+  concurrent review's live dir), closing the disk-hygiene gap for a SIGKILLed
+  transcription.
 - Retry on the transient agent-call path was considered and deliberately left
   **out of scope** (see issue #22): the review-level rerun is the retry.
 
