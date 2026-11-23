@@ -124,14 +124,16 @@ export function collectImageRefs({ description = "", comments = [], botUsernames
 
 /**
  * Transcribe one screenshot through the shared opencode agent runtime: write the
- * image to a temp file, call the `pr-vision` agent with `--file`, and map the
- * agent's usage back onto the `{ text, usage }` envelope the image step expects.
+ * image to a temp file, call the `pr-vision` agent with `--file`, and return a
+ * plain `{ ok, text, usage, stdout, stderr, error }` envelope the caller can
+ * both price (`usage`) and persist as an artifact (`.log` = stdout/stderr).
  *
  * `usage` is the standard 4-field agent shape `{ input, output, cacheRead,
  * cacheWrite }` (or `null` when the stream carried no token data) — the upgrade
  * from the old 2-field HTTP shape, so cache tokens are priced, not dropped.
- * Never throws: any failure degrades to `null` (the caller counts it as
- * unreadable). One agent call per image — no retry loop.
+ * Never throws: any failure degrades to a resolved envelope with `ok: false`
+ * (the caller counts it as unreadable). Pre-flight skips (no bytes / invalid
+ * model) return `null` — nothing was attempted.
  */
 export async function transcribeViaAgent({
   config,
@@ -158,7 +160,19 @@ export async function transcribeViaAgent({
       return null;
     }
     const ext = IMAGE_EXT[String(mimeType).toLowerCase()] || "png";
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pr-vision-"));
+    // Anchor the scratch dir inside the project root (config.dirs.visionScratch)
+    // instead of the OS temp dir: `opencode run` resolves its session's project
+    // by walking up from the child cwd, and a bare /tmp dir can be taken for an
+    // agent-less "new project" of its own — so the shared server never loads
+    // `.opencode/agents/pr-vision.md` and every image fails with
+    // "Agent not found: pr-vision" — the intermittent all-screenshots-unreadable
+    // failure). The configured scratch root sits
+    // under the project root, so opencode resolves the session to the app
+    // project and finds the agent like the reviewers do — while the image still
+    // lands in an isolated dir, never the app/review working directory.
+    const scratchRoot = config.dirs?.visionScratch || os.tmpdir();
+    await fs.mkdir(scratchRoot, { recursive: true });
+    tempDir = await fs.mkdtemp(path.join(scratchRoot, "pr-vision-"));
     const tempImagePath = path.join(tempDir, `image.${ext}`);
     await fs.writeFile(tempImagePath, imageBytes);
     const res = await runner({
@@ -177,24 +191,43 @@ export async function transcribeViaAgent({
       message: VISION_TRANSCRIBE_MESSAGE,
     });
     // runAgent *resolves* (never rejects) on timeout / non-zero exit / spawn
-    // failure with `ok: false` — treat that as a failed transcription so a
-    // truncated partial stream never becomes authoritative review context.
-    // The run can still have consumed billable tokens, so surface `usage` even
-    // when the caption is unusable: the caller prices it before marking the
-    // image unreadable (Copilot #17 MEDIUM 2).
+    // failure with `ok: false` — that run is not authoritative context, but it
+    // may still have consumed billable tokens, so surface `usage` even when the
+    // caption is unusable: the caller prices it before marking the image
+    // unreadable (Copilot #17 MEDIUM 2). The real stderr/stdout is carried back
+    // so the pipeline can persist a `vision-N.log` artifact (the "exit code 1"
+    // alone hid an `AgentNotFoundError` — that diagnosis must survive to the
+    // job dir, not just the log line).
     if (res?.ok === false) {
-      log.warn(`vision: transcription failed: ${res.error || "agent call failed"}`);
-      return res?.usage ? { text: null, usage: res.usage } : null;
+      log.warn(
+        `vision: transcription failed: ${res.error || "agent call failed"}` +
+          (res.stderr ? ` — stderr: ${res.stderr.split("\n").slice(-4).join(" | ").slice(-400)}` : ""),
+      );
+      return {
+        ok: false,
+        text: null,
+        usage: res.usage ?? null,
+        stdout: res.stdout || "",
+        stderr: res.stderr || "",
+        error: res.error || "agent call failed",
+      };
     }
     const text = res?.text?.trim();
     if (!text) {
       log.warn("vision: transcription returned no text");
-      return res?.usage ? { text: null, usage: res.usage } : null;
+      return {
+        ok: false,
+        text: null,
+        usage: res?.usage ?? null,
+        stdout: res?.stdout || "",
+        stderr: res?.stderr || "",
+        error: "transcription returned no text",
+      };
     }
-    return { text, usage: res.usage ?? null };
+    return { ok: true, text, usage: res.usage ?? null, stdout: res.stdout || "", stderr: res.stderr || "", error: null };
   } catch (err) {
     log.warn(`vision: transcription failed: ${err.message}`);
-    return null;
+    return { ok: false, text: null, usage: null, stdout: "", stderr: `${err.stack || err.message}\n`, error: err.message };
   } finally {
     if (tempDir) {
       // Cleanup is guaranteed even when the runner throws or times out; a
@@ -209,6 +242,46 @@ export async function transcribeViaAgent({
 }
 
 /**
+ * Sweep stale per-image scratch dirs out of `dirs.visionScratch` (best-effort,
+ * never throws). Each transcription's temp dir lives at most one call-timeout
+ * window, so a sweep only ever removes dirs older than the configured
+ * `review.visionScratchMaxAgeMs` — floored at two call timeouts so a
+ * misconfigured tiny value can never delete a concurrent review's live dir.
+ * Returns the number of dirs removed. `maxAgeMs` <= 0 disables the sweep.
+ */
+export async function sweepVisionScratch(config) {
+  const scratchRoot = config.dirs?.visionScratch || os.tmpdir();
+  const maxAge = Number(config.review?.visionScratchMaxAgeMs) || 0;
+  if (!(maxAge > 0)) return 0;
+  const callTimeout = Number(config.review?.visionCallTimeoutMs) || 60000;
+  const age = Math.max(maxAge, 2 * callTimeout);
+  let entries = [];
+  try {
+    entries = await fs.readdir(scratchRoot, { withFileTypes: true });
+  } catch {
+    return 0; // root may not exist yet — nothing to sweep
+  }
+  const now = Date.now();
+  let removed = 0;
+  for (const e of entries) {
+    if (!e.isDirectory() || !String(e.name).startsWith("pr-vision-")) continue;
+    const full = path.join(scratchRoot, e.name);
+    try {
+      const st = await fs.stat(full);
+      if (now - st.mtimeMs >= age) {
+        await fs.rm(full, { recursive: true, force: true });
+        removed += 1;
+        log.warn(`vision: swept stale screenshot scratch ${full} (mtime ${new Date(st.mtimeMs).toISOString()})`);
+      }
+    } catch (err) {
+      log.warn(`vision: could not sweep ${full}: ${err.message}`);
+    }
+  }
+  if (removed) log.info(`vision: swept ${removed} stale screenshot scratch dir(s) from ${scratchRoot}`);
+  return removed;
+}
+
+/**
  * Build the "PR screenshots (transcribed)" context block. Returns
  * `{ block, usage, transcribed, unreadable }`:
  *   - `block`: the markdown block, or "" when there are no images, none could
@@ -217,7 +290,13 @@ export async function transcribeViaAgent({
  *   - `usage`: `{ input, output, cacheRead, cacheWrite }` token counts summed
  *     across every successful transcription (null when no image yielded usage),
  *     so the vision model's cost can be priced separately (see src/pipeline.js);
- *   - `transcribed` / `unreadable`: image counts for the dashboard row.
+ *   - `transcribed` / `unreadable`: image counts for the dashboard row;
+ *   - `images`: per-image records (one per picked image, in `index` order:
+ *     `{ index, sourceLabel, alt, ok, text, usage, stdout, stderr, error }`) so
+ *     the pipeline can persist a `vision-<index>.txt/.log/.json` artifact per
+ *     image like the reviewer attempts — including the failed ones, whose real
+ *     stderr (e.g. `AgentNotFoundError`) must reach the job dir, not just the
+ *     log line (see src/pipeline.js).
  * Never throws.
  */
 export async function loadScreenshotBlock({
@@ -237,10 +316,18 @@ export async function loadScreenshotBlock({
     if (!items.length) return EMPTY_RESULT;
     const picked = items.slice(0, Math.max(1, Number(review.visionMaxImages) || 6));
 
+    // Best-effort: sweep stale per-image scratch dirs left over from earlier
+    // (possibly killed) runs, before this review writes new ones. Never fatal.
+    await sweepVisionScratch(config);
+
     const entries = [];
+    const images = [];
     let unreadable = 0;
     const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    let index = 0;
     for (const { ref: img, sourceLabel } of picked) {
+      index += 1;
+      const alt = img.alt || `image #${index}`;
       const downloaded = await downloadImage({
         client,
         config,
@@ -251,6 +338,7 @@ export async function loadScreenshotBlock({
       });
       if (!downloaded) {
         unreadable += 1;
+        images.push({ index, sourceLabel, alt, ok: false, text: "", usage: null, stdout: "", stderr: "", error: "image could not be fetched" });
         continue;
       }
       const res = await transcribe({
@@ -263,20 +351,34 @@ export async function loadScreenshotBlock({
       // Price the agent run's tokens even when the caption is unusable (failed,
       // timed out, or empty text): the run was billed, so record usage before
       // the unreadable-path `continue` below (Copilot #17 MEDIUM 2).
-      const u = res && typeof res === "object" ? res.usage : null;
+      const structured = res && typeof res === "object" && !Array.isArray(res);
+      const u = structured ? res.usage : null;
       if (u) {
         usage.input += u.input || 0;
         usage.output += u.output || 0;
         usage.cacheRead += u.cacheRead || 0;
         usage.cacheWrite += u.cacheWrite || 0;
       }
-      // Accept both the structured `{ text, usage }` and a plain string caption.
-      const caption = res ? (typeof res === "string" ? res : res.text) : null;
-      if (!caption) {
+      // Accept both the structured envelope `{ ok, text, usage, stdout, stderr,
+      // error }` (from transcribeViaAgent) and a plain string caption (tests).
+      const caption = structured ? res.text : res;
+      const record = {
+        index,
+        sourceLabel,
+        alt,
+        ok: structured ? !!(res.ok !== false && caption) : !!caption,
+        text: caption || "",
+        usage: u,
+        stdout: structured && res.stdout ? res.stdout : "",
+        stderr: structured && res.stderr ? res.stderr : "",
+        error: structured && res.error ? res.error : null,
+      };
+      images.push(record);
+      if (!record.ok) {
         unreadable += 1;
         continue;
       }
-      entries.push({ sourceLabel, alt: img.alt || `image #${img.attachmentId || picked.indexOf({ ref: img }) + 1}`, caption });
+      entries.push({ sourceLabel, alt, caption });
     }
     if (!entries.length && !unreadable) return EMPTY_RESULT;
 
@@ -299,11 +401,17 @@ export async function loadScreenshotBlock({
     }
     const block = lines.join("\n");
     log.info(`PR screenshots attached (${entries.length} transcribed, ${unreadable} unreadable)`);
-    return { block, usage: usage.input || usage.output || usage.cacheRead || usage.cacheWrite ? usage : null, transcribed: entries.length, unreadable };
+    return {
+      block,
+      usage: usage.input || usage.output || usage.cacheRead || usage.cacheWrite ? usage : null,
+      transcribed: entries.length,
+      unreadable,
+      images,
+    };
   } catch (err) {
     log.warn(`vision: PR screenshots step degraded: ${err.message}`);
     return EMPTY_RESULT;
   }
 }
 
-const EMPTY_RESULT = Object.freeze({ block: "", usage: null, transcribed: 0, unreadable: 0 });
+const EMPTY_RESULT = Object.freeze({ block: "", usage: null, transcribed: 0, unreadable: 0, images: [] });

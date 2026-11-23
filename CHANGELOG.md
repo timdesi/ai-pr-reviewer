@@ -10,6 +10,35 @@ below the `v0.2.x` entries.
 
 ---
 
+## Unreleased — Vision transcription reliability & observability
+
+- **Fixes an intermittent "all screenshots unreadable" failure.** The vision
+  transcription ran `opencode run --agent pr-vision` with the image in a bare
+  OS-temp dir; the shared opencode server could take that dir for an agent-less
+  "new project", never load `.opencode/agents/pr-vision.md`, and fail every
+  image with `Session.AgentNotFoundError: Agent not found: "pr-vision"` — while
+  the app logged only an unhelpful `vision: transcription failed: exit code 1`.
+  The scratch dir is now anchored **inside the project root**
+  (`dirs.visionScratch`, `VISION_SCRATCH_DIR`, default `./data/vision-scratch`),
+  so the server always resolves the session to the app project and finds the
+  agent (same path the reviewers use); the image still lands in an isolated
+  per-call subdir, never the app/review working dir (Copilot #17 isolation kept).
+- **The real failure is now observable.** `transcribeViaAgent` returns a
+  structured `{ ok, text, usage, stdout, stderr, error }` envelope and the
+  pipeline persists per-image artifacts into the job dir — `vision-<n>.txt`
+  (transcription), `vision-<n>.log` (agent stdout/stderr, where the
+  `AgentNotFoundError` now lives), and `vision-<n>.json` (usage/cost/metadata) —
+  mirroring the reviewer `-attempt-N.*` artifacts and picked up by the dashboard
+  automatically.
+- **Crash leftovers can't accumulate.** A best-effort `sweepVisionScratch`
+  removes `pr-vision-*` subdirs older than `VISION_SCRATCH_MAX_AGE_MS` (default
+  1 h, floored at two call timeouts so it never touches a concurrent review's
+  live dir), closing the disk-hygiene gap for a SIGKILLed transcription.
+- Retry on the transient agent-call path was considered and deliberately left
+  **out of scope** (see issue #22): the review-level rerun is the retry.
+
+---
+
 ## v0.5.7 — 2026-11-22 — Bitbucket 429 storm: process-wide governor (pace + circuit-breaker + retry)
 
 - **429 storms (and the Bitbucket body-read failures they cause) are now handled

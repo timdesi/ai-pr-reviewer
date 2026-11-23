@@ -343,15 +343,52 @@ export async function runReview({ ref, config, options = {} }) {
     prImagesBlock = prImages?.block || "";
     // The vision transcription is priced separately from the reviewers (its own
     // model — never folded into a reviewer's usage) and shown as its own row.
+    const visionUsage = prImages?.usage ?? null;
     status.vision = {
       model: config.review.visionModel,
-      usage: prImages?.usage ?? null,
-      cost: prImages?.usage
-        ? computeCost(prices, config.review.visionModel, prImages.usage)
+      usage: visionUsage,
+      cost: visionUsage
+        ? computeCost(prices, config.review.visionModel, visionUsage)
         : null,
       transcribed: prImages?.transcribed ?? 0,
       unreadable: prImages?.unreadable ?? 0,
     };
+    // Persist per-image vision artifacts into the job dir, mirroring the
+    // reviewer attempts (reviewer-X-attempt-N.txt/.log): the transcription text
+    // (.txt), the agent's raw stdout/stderr (.log — this is what made an
+    // `AgentNotFoundError` invisible before, and it must survive to the job
+    // dir, not just the log line), and the usage/cost + metadata (.json for the
+    // dashboard to price). Best-effort: an artifact write failure is logged,
+    // never fatal (see readJobArtifacts).
+    for (const img of prImages?.images || []) {
+      const base = `vision-${img.index}`;
+      try {
+        writeFileSync(path.join(jobDir, `${base}.txt`), img.ok && img.text ? img.text : `(unreadable: ${img.error || "no caption"})`);
+        if (img.stdout || img.stderr) {
+          writeFileSync(path.join(jobDir, `${base}.log`), `${img.stdout}\n--- stderr ---\n${img.stderr}`);
+        }
+        writeFileSync(
+          path.join(jobDir, `${base}.json`),
+          JSON.stringify(
+            {
+              index: img.index,
+              ok: img.ok,
+              sourceLabel: img.sourceLabel,
+              alt: img.alt,
+              error: img.error,
+              usage: img.usage,
+              cost: img.usage
+                ? computeCost(prices, config.review.visionModel, img.usage)
+                : null,
+            },
+            null,
+            2,
+          ),
+        );
+      } catch (err) {
+        log.warn(`vision: could not write artifact ${base} in ${jobDir}: ${err.message}`);
+      }
+    }
   } else if (config.review.fetchPrImages && !config.review.visionModel) {
     // Transparent skip: the script flag/additive design is easy to trip up if
     // someone enables fetchPrImages without VISION_MODEL — surface it instead
