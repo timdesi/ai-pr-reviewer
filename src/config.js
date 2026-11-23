@@ -281,6 +281,13 @@ export function loadConfig({ envFile } = {}) {
       workspaceRoot: path.resolve(projectRoot, str("WORKSPACE_ROOT", "./data/workspaces")),
       // Per-repository project-context files, `<PROJECT>-<repo>.md` (fallback `<repo>.md`).
       contexts: path.resolve(projectRoot, str("REVIEW_CONTEXT_DIR", "./contexts")),
+      // Scratch root for the vision (screenshot-transcription) working dir. It
+      // must stay INSIDE the project root: `opencode run` resolves its session's
+      // project by walking up from the child cwd, and a bare /tmp scratch dir
+      // can be taken for an agent-less project of its own — making the shared
+      // server miss `.opencode/agents/pr-vision.md` and fail every image with
+      // "Agent not found: pr-vision" (intermittent all-screenshots-unreadable).
+      visionScratch: path.resolve(projectRoot, str("VISION_SCRATCH_DIR", "./data/vision-scratch")),
     },
     review: {
       // Additionally fetch AGENTS.md from the reviewed repo (at the head SHA)
@@ -310,6 +317,12 @@ export function loadConfig({ envFile } = {}) {
       visionMaxImageBytes: num("VISION_MAX_IMAGE_BYTES", 10 * 1024 * 1024),
       visionFetchTimeoutMs: num("VISION_FETCH_TIMEOUT_MS", 30000),
       visionCallTimeoutMs: num("VISION_CALL_TIMEOUT_MS", 60000),
+      // Age floor for sweeping stale per-image scratch dirs out of
+      // `dirs.visionScratch`. A transcription's temp dir lives at most one
+      // `visionCallTimeoutMs` window, so a sweep only ever touches dirs far
+      // older than a live in-flight call (never a concurrent review's). The
+      // default (1 h) is a deliberate safety margin; 0 disables the sweep.
+      visionScratchMaxAgeMs: num("VISION_SCRATCH_MAX_AGE_MS", 60 * 60 * 1000),
       // Public-comment gate: findings below either threshold are listed
       // compactly under "Minor" and do not drive the merge verdict.
       commentMinSeverity: str("COMMENT_MIN_SEVERITY", "MEDIUM").toUpperCase(),

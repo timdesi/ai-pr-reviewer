@@ -1,9 +1,10 @@
 import { readFileSync, existsSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractImageRefs, collectImageRefs, loadScreenshotBlock, transcribeViaAgent } from "../src/prImages.js";
+import { extractImageRefs, collectImageRefs, loadScreenshotBlock, sweepVisionScratch, transcribeViaAgent } from "../src/prImages.js";
 
 const BOT = "mybot@example.com";
 const baseConfig = {
@@ -80,7 +81,7 @@ test("loadScreenshotBlock: empty/disabled → ''", async () => {
     (await loadScreenshotBlock({ client: { fetchBuffer: async () => ({}) }, config: baseConfig, ref, description: "no images" })).block,
     "",
   );
-  assert.deepEqual((await loadScreenshotBlock({ client: null, config: baseConfig, ref })), { block: "", usage: null, transcribed: 0, unreadable: 0 });
+  assert.deepEqual((await loadScreenshotBlock({ client: null, config: baseConfig, ref })), { block: "", usage: null, transcribed: 0, unreadable: 0, images: [] });
 });
 
 test("loadScreenshotBlock: transcriptions from description + comments, dedupes", async () => {
@@ -115,6 +116,14 @@ test("loadScreenshotBlock: transcriptions from description + comments, dedupes",
   assert.equal(res.transcribed, 2);
   assert.equal(res.unreadable, 0);
   assert.equal(res.usage, null);
+  // Per-image records for the pipeline to persist as artifacts.
+  assert.equal(res.images.length, 2, "one image record per picked image, including metadata");
+  assert.equal(res.images[0].index, 1);
+  assert.equal(res.images[0].sourceLabel, "description");
+  assert.equal(res.images[0].alt, "desc shot");
+  assert.equal(res.images[0].ok, true);
+  assert.equal(res.images[0].text, "the ATP Check config screen");
+  assert.equal(res.images[1].alt, "Screenshot 2026-11-11 at 11.51.33.png");
 });
 
 test("loadScreenshotBlock: failed fetch/transcript → 'not viewable' note, never throws", async () => {
@@ -207,7 +216,7 @@ test("loadScreenshotBlock: empty visionModel skips the image step (empty block, 
     description: "![a](attachment:1/2)",
     activities: [],
   });
-  assert.deepEqual(res, { block: "", usage: null, transcribed: 0, unreadable: 0 });
+  assert.deepEqual(res, { block: "", usage: null, transcribed: 0, unreadable: 0, images: [] });
   assert.ok(!res.block.includes("could not be fetched/read"), "downloads never attempted, no degrade note");
 });
 
@@ -240,47 +249,85 @@ test("transcribeViaAgent: writes the image to a temp file and calls runAgent (--
   assert.equal(captured.cwd, path.dirname(captured.file), "cwd isolated to the screenshot temp dir (Copilot #17 HIGH)");
   assert.equal(Buffer.from(captured.written).toString(), "png", "image bytes written verbatim");
   assert.match(captured.message, /[Tt]ranscrib/);
-  assert.deepEqual(out, { text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 } });
+  assert.deepEqual(out, { ok: true, text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 }, stdout: "", stderr: "", error: null });
   assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after success");
 });
 
-test("transcribeViaAgent: returns null and cleans up when the agent call fails (never throws)", async () => {
+test("transcribeViaAgent: runner throw → resolved fail envelope + cleanup (never throws)", async () => {
   let captured = null;
   const runner = async (arg) => {
     captured = arg;
     throw new Error("boom");
   };
-  assert.equal(await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }), null);
+  const out = await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner });
+  assert.equal(out.ok, false);
+  assert.equal(out.text, null);
+  assert.equal(out.error, "boom");
+  assert.match(out.stderr, /boom/, "the exception stack/reason is surfaced, not dropped");
   assert.ok(captured, "runner was reached");
   assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after runner throw");
 });
 
-test("transcribeViaAgent: ok:false (timeout/non-zero exit) with partial text → null (usage preserved)", async () => {
-  assert.equal(
-    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ ok: false, text: "partial transcription…", usage: null }) }),
-    null,
-  );
+test("transcribeViaAgent: ok:false (timeout/non-zero exit) → resolved fail envelope; usage + stderr surfaced", async () => {
+  const fail = await transcribeViaAgent({
+    config: visionConfig,
+    model: "m",
+    imageBytes: Buffer.from("x"),
+    runner: async () => ({ ok: false, text: "partial transcription…", error: "exit code 1", stderr: "Session.AgentNotFoundError: Agent not found: \"pr-vision\"", usage: null }),
+  });
+  assert.equal(fail.ok, false);
+  assert.equal(fail.text, null);
+  assert.equal(fail.error, "exit code 1");
+  assert.match(fail.stderr, /AgentNotFoundError/, "the real stderr survives to the artifact, not just a bare 'exit code 1'");
+  assert.equal(fail.usage, null);
   // A billable run with no usable caption still reports its tokens (Copilot #17 MEDIUM 2).
-  assert.deepEqual(
-    await transcribeViaAgent({
-      config: visionConfig,
-      model: "m",
-      imageBytes: Buffer.from("x"),
-      runner: async () => ({ ok: false, text: "partial…", usage: { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 } }),
-    }),
-    { text: null, usage: { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 } },
-  );
+  const priced = await transcribeViaAgent({
+    config: visionConfig,
+    model: "m",
+    imageBytes: Buffer.from("x"),
+    runner: async () => ({ ok: false, text: "partial…", usage: { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 } }),
+  });
+  assert.equal(priced.ok, false);
+  assert.deepEqual(priced.usage, { input: 90, output: 30, cacheRead: 4, cacheWrite: 1 });
 });
 
-test("transcribeViaAgent: empty/whitespace text → null (usage preserved)", async () => {
-  assert.equal(
-    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "   ", usage: null }) }),
-    null,
-  );
-  assert.deepEqual(
-    await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "", usage: { input: 12, output: 3 } }) }),
-    { text: null, usage: { input: 12, output: 3 } },
-  );
+test("transcribeViaAgent: empty/whitespace text → fail envelope (never taken as context)", async () => {
+  const a = await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "   ", usage: null }) });
+  assert.equal(a.ok, false);
+  assert.equal(a.text, null);
+  assert.equal(a.error, "transcription returned no text");
+  const b = await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner: async () => ({ text: "", usage: { input: 12, output: 3 } }) });
+  assert.equal(b.ok, false);
+  assert.deepEqual(b.usage, { input: 12, output: 3 });
+});
+
+test("transcribeViaAgent: success returns the full envelope (text + usage + streams)", async () => {
+  const out = await transcribeViaAgent({
+    config: visionConfig,
+    model: "m",
+    imageBytes: Buffer.from("x"),
+    runner: async () => ({ text: "the ATP Check config screen", usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 }, stdout: "…agent boot lines…", stderr: "" }),
+  });
+  assert.deepEqual(out, {
+    ok: true,
+    text: "the ATP Check config screen",
+    usage: { input: 100, output: 40, cacheRead: 5, cacheWrite: 3 },
+    stdout: "…agent boot lines…",
+    stderr: "",
+    error: null,
+  });
+});
+
+test("transcribeViaAgent: no retry — a transient ok:false runs the agent exactly once", async () => {
+  let calls = 0;
+  const runner = async (arg) => {
+    calls += 1;
+    return { ok: false, text: "", error: "exit code 1", stderr: "Session.AgentNotFoundError: Agent not found: \"pr-vision\"" };
+  };
+  const out = await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner });
+  assert.equal(calls, 1, "no unbounded/automatic retry loop in the vision step (retry is explicitly out of scope; a rerun of the review is the retry)");
+  assert.equal(out.ok, false);
+  assert.match(out.stderr, /AgentNotFoundError/);
 });
 
 test("transcribeViaAgent: missing model → null (skip)", async () => {
@@ -292,6 +339,21 @@ test("transcribeViaAgent: missing model → null (skip)", async () => {
   assert.equal(await transcribeViaAgent({ config: visionConfig, model: "", imageBytes: Buffer.from("x"), runner }), null);
   assert.equal(await transcribeViaAgent({ config: visionConfig, imageBytes: Buffer.from("x"), runner }), null);
   assert.equal(called, false, "runner never called without a model");
+});
+
+test("transcribeViaAgent: scratch dir lands under config.dirs.visionScratch when set", async () => {
+  let captured = null;
+  const runner = async (arg) => {
+    captured = arg;
+    return { text: "ok" };
+  };
+  const scratch = path.join(os.tmpdir(), "cfg-vision-scratch-test");
+  const cfg = { ...visionConfig, dirs: { visionScratch: scratch } };
+  const out = await transcribeViaAgent({ config: cfg, model: "m", imageBytes: Buffer.from("x"), runner });
+  assert.ok(out);
+  assert.ok(captured.cwd.startsWith(scratch + path.sep), "scratch is under the configured project-anchored root");
+  assert.equal(captured.cwd, path.dirname(captured.file), "cwd still isolated to the screenshot dir");
+  assert.ok(!existsSync(path.dirname(captured.file)), "temp dir removed after success");
 });
 
 test("transcribeViaAgent: invalid model id → null before delegating (validate-before-delegate)", async () => {
@@ -331,4 +393,126 @@ test("transcribeViaAgent: mime type maps to the file extension (unknown → png)
   await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), mimeType: "image/svg+xml", runner });
   await transcribeViaAgent({ config: visionConfig, model: "m", imageBytes: Buffer.from("x"), runner }); // default png
   assert.deepEqual(exts, [".jpg", ".webp", ".png", ".png"]);
+});
+
+test("loadScreenshotBlock: failed fetch still yields an image record (indexed, error surfaced)", async () => {
+  const client = {
+    fetchBuffer: async () => {
+      throw new Error("no permission");
+    },
+  };
+  const res = await loadScreenshotBlock({
+    client,
+    config: baseConfig,
+    ref,
+    description: "![a](attachment:1/55)",
+    activities: [],
+    transcribe: async () => "never called",
+  });
+  assert.equal(res.images.length, 1);
+  assert.equal(res.images[0].ok, false);
+  assert.equal(res.images[0].text, "");
+  assert.equal(res.images[0].error, "image could not be fetched");
+});
+
+test("loadScreenshotBlock: structured fail envelope (stderr) lands in the image record, not the block", async () => {
+  const fetchBuffer = async () => ({ bytes: Buffer.from("x"), contentType: "image/png" });
+  const client = { fetchBuffer };
+  const res = await loadScreenshotBlock({
+    client,
+    config: baseConfig,
+    ref,
+    description: "![a](attachment:1/1)",
+    activities: [],
+    transcribe: async () => ({
+      ok: false,
+      text: null,
+      usage: { input: 5, output: 2 },
+      stdout: "",
+      stderr: "Session.AgentNotFoundError: Agent not found: \"pr-vision\"",
+      error: "exit code 1",
+    }),
+  });
+  assert.equal(res.unreadable, 1);
+  assert.ok(res.block.includes("could not be fetched/read"));
+  assert.equal(res.images[0].ok, false);
+  assert.match(res.images[0].stderr, /AgentNotFoundError/, "the artifact source of truth carries the real error");
+  assert.deepEqual(res.images[0].usage, { input: 5, output: 2 }, "failed run still priced");
+});
+
+test("loadScreenshotBlock: transcribe pre-flight skip (null) records the real reason, not 'no caption'", async () => {
+  const fetchBuffer = async () => ({ bytes: Buffer.from("x"), contentType: "image/png" });
+  const client = { fetchBuffer };
+  const res = await loadScreenshotBlock({
+    client,
+    config: baseConfig,
+    ref,
+    description: "![a](attachment:1/7)",
+    activities: [],
+    transcribe: async () => null, // nothing attempted (e.g. invalid model id)
+  });
+  assert.equal(res.unreadable, 1, "a skip still counts as unreadable");
+  assert.equal(res.images.length, 1);
+  assert.equal(res.images[0].ok, false);
+  assert.equal(res.images[0].error, "transcription skipped (no attempt)", "artifact carries the real reason, not the generic 'no caption' fallback");
+});
+
+// --- sweepVisionScratch ------------------------------------------------------
+
+function scratchCfg({ maxAge, callTimeout, dir }) {
+  return {
+    dirs: { visionScratch: dir || path.join(os.tmpdir(), `sweep-cfg-${Math.random().toString(36).slice(2)}`) },
+    review: { visionScratchMaxAgeMs: maxAge, visionCallTimeoutMs: callTimeout },
+  };
+}
+
+async function makeScratchDir(cfg, name, mtimeMs) {
+  const full = path.join(cfg.dirs.visionScratch, name);
+  await import("node:fs/promises").then((fs) => fs.mkdir(full, { recursive: true }));
+  await import("node:fs/promises").then((fs) => fs.writeFile(path.join(full, "image.png"), Buffer.from("x")));
+  await import("node:fs/promises").then((fs) => {
+    const t = new Date(mtimeMs);
+    fs.utimes(full, t, t);
+    fs.utimes(path.join(full, "image.png"), t, t);
+  });
+  return full;
+}
+
+test("sweepVisionScratch: removes only dirs older than the age floor", async () => {
+  const cfg = scratchCfg({ maxAge: 3600000, callTimeout: 60000 });
+  const now = Date.now();
+  await makeScratchDir(cfg, "pr-vision-stale", now - 3 * 3600000); // 3 h old → sweep
+  await makeScratchDir(cfg, "pr-vision-fresh", now - 60_000); // 1 min old → keep
+  await makeScratchDir(cfg, "pr-vision-edge", now - 3601000); // just past floor → sweep
+  await makeScratchDir(cfg, "not-a-vision-dir", now - 5 * 3600000); // non-matching name → keep
+  const removed = await sweepVisionScratch(cfg);
+  assert.equal(removed, 2, "stale + edge swept; fresh and non-matching kept");
+  const fs = await import("node:fs/promises");
+  assert.ok(!(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-stale").catch(() => null)));
+  assert.ok(!(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-edge").catch(() => null)));
+  assert.ok(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-fresh"));
+  assert.ok(await fs.stat(cfg.dirs.visionScratch + "/not-a-vision-dir"));
+  await fs.rm(cfg.dirs.visionScratch, { recursive: true, force: true });
+});
+
+test("sweepVisionScratch: absolute 60s floor protects live dirs even with tiny maxAge+timeout", async () => {
+  // Misconfigured tiny values: 2*callTimeout = 1s, but the absolute floor keeps a
+  // 20s-old dir — a live concurrent transcription — untouched (never swept).
+  const cfg = scratchCfg({ maxAge: 1000, callTimeout: 500 });
+  await makeScratchDir(cfg, "pr-vision-live", Date.now() - 20_000);
+  assert.equal(await sweepVisionScratch(cfg), 0, "60s absolute floor beats the tiny 2*timeout floor");
+  const fs = await import("node:fs/promises");
+  assert.ok(await fs.stat(cfg.dirs.visionScratch + "/pr-vision-live"));
+  await fs.rm(cfg.dirs.visionScratch, { recursive: true, force: true });
+});
+
+test("sweepVisionScratch: respects maxAge=0 (disabled) and a missing root", async () => {
+  const disabled = scratchCfg({ maxAge: 0, callTimeout: 60000 });
+  await makeScratchDir(disabled, "pr-vision-old", Date.now() - 100 * 3600000);
+  assert.equal(await sweepVisionScratch(disabled), 0, "maxAge 0 disables the sweep entirely");
+  // Missing/empty root → best-effort 0, never throws.
+  const missing = scratchCfg({ maxAge: 3600000, callTimeout: 60000, dir: path.join(os.tmpdir(), `never-created-${Math.random().toString(36).slice(2)}`) });
+  assert.equal(await sweepVisionScratch(missing), 0);
+  assert.equal(await sweepVisionScratch({ dirs: {}, review: { visionScratchMaxAgeMs: 3600000 } }), 0, "falls back to os.tmpdir() without throwing");
+  await import("node:fs/promises").then((fs) => fs.rm(disabled.dirs.visionScratch, { recursive: true, force: true }));
 });
