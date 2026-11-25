@@ -4,7 +4,8 @@
 //
 // Serves the static UI from `ui/` (the project root of the `dev` folder) and
 // exposes:
-//   GET  /api/jobs                list past/active jobs
+//   GET  /api/jobs                list past/active jobs (?app=PROJECT/repo filters)
+//   GET  /api/jobs/apps           app → job count for the app filter dropdown
 //   GET  /api/jobs/:name          job detail (status.json)
 //   GET  /api/jobs/:name/artifacts  all artifact files (bounded content)
 //   GET  /api/contexts                 list curated context files (per-repo,
@@ -48,7 +49,7 @@ import path from "node:path";
 
 import { loadConfig, assertAnyBackendConfig } from "./config.js";
 import { parsePrRef } from "./prUrl.js";
-import { runReview, listJobsPage, finalizeStaleJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
+import { runReview, listJobsPage, listJobApps, finalizeStaleJobs, readJobSummary, readJobArtifacts, jobPrefixFor } from "./pipeline.js";
 import { listPulls, clearPullCacheEntry } from "./pulls.js";
 import { computeStats } from "./stats.js";
 import { parseWebhookRequest, verifySignature, isUnsignedDiagnostic, isForceReview } from "./webhook.js";
@@ -647,10 +648,18 @@ export function createServer({ config, port = config.server.port, host = config.
         // Paginated + slim: reads only `limit` job summaries, no huge payload to
         // serialize on the single-threaded loop (issue #6). The UI pages with
         // ?limit&offset; `total` lets it show "of N" without fetching all.
+        // `app=PROJECT/repo` filters before pagination (correct totals/pages).
         const q = new URL(req.url, "http://localhost").searchParams;
         const limit = Math.max(0, parseInt(q.get("limit") ?? "50", 10) || 50);
         const offset = Math.max(0, parseInt(q.get("offset") ?? "0", 10) || 0);
-        return sendJson(res, 200, listJobsPage(config, { limit, offset }));
+        const app = q.get("app") ?? "";
+        return sendJson(res, 200, listJobsPage(config, { limit, offset, app }));
+      }
+
+      // App → job count for the left-sidebar app filter (matched before the
+      // `/api/jobs/:name` detail routes below).
+      if (url === "/api/jobs/apps") {
+        return sendJson(res, 200, listJobApps(config));
       }
 
       // --- per-PR view ------------------------------------------------------

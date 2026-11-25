@@ -852,16 +852,34 @@ export function listJobs(config) {
   return entries.map((name) => readJobSummary(config, name));
 }
 
+// The `PROJECT/repo` app a job belongs to, from its own ref (job-meta.json,
+// falling back to status.json for older jobs). Empty string for jobs whose ref
+// is unknown. Only reads the two small meta files — never the heavy summaries.
+function appOfJob(config, jobName) {
+  const jobDir = path.join(config.dirs.jobs, jobName);
+  const meta = readFileJson(path.join(jobDir, "job-meta.json")) || {};
+  const status = readFileJson(path.join(jobDir, "status.json")) || {};
+  const ref = meta.ref || status.ref || null;
+  if (!ref || ref.projectKey == null || ref.repoSlug == null) return "";
+  return `${ref.projectKey}/${ref.repoSlug}`;
+}
+
 /**
  * Paginated + slim job list for the dashboard (GET /api/jobs). Newest first.
  * Reads only `limit` job summaries and returns lightweight records (no large
  * streaming/consensus text), so a large job store can never stall the event
  * loop by serializing a multi-MB payload (issue #6). Also returns the total job
  * count so the UI can page without knowing the cap.
+ *
+ * An optional `app` (`PROJECT/repo`) filters *before* pagination so the total
+ * and every page reflect only that app's jobs. The filter is off by default
+ * and only reads the small meta files when active — the unfiltered hot path
+ * stays a single readdir + `limit` summaries.
  */
-export function listJobsPage(config, { limit = 50, offset = 0 } = {}) {
+export function listJobsPage(config, { limit = 50, offset = 0, app = "" } = {}) {
+  const sel = typeof app === "string" ? app.trim() : "";
   const jobsDir = config.dirs.jobs;
-  if (!existsSync(jobsDir)) return { jobs: [], total: 0, limit, offset };
+  if (!existsSync(jobsDir)) return { jobs: [], total: 0, limit, offset, app: sel };
   const names = readdirSync(jobsDir, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
@@ -871,10 +889,41 @@ export function listJobsPage(config, { limit = 50, offset = 0 } = {}) {
       const tb = statTime(jobsDir, b);
       return tb - ta;
     });
-  const total = names.length;
-  const page = names.slice(offset, limit > 0 ? offset + limit : undefined);
+  const wantsApp = sel !== "";
+  let total;
+  let page;
+  if (wantsApp) {
+    const matches = names.filter((name) => appOfJob(config, name) === sel);
+    total = matches.length;
+    page = matches.slice(offset, limit > 0 ? offset + limit : undefined);
+  } else {
+    total = names.length;
+    page = names.slice(offset, limit > 0 ? offset + limit : undefined);
+  }
   const jobs = page.map((name) => readJobSummary(config, name, { slim: true }));
-  return { jobs, total, limit, offset };
+  return { jobs, total, limit, offset, app: sel };
+}
+
+/**
+ * App → job-count map for the app filter dropdown (GET /api/jobs/apps), so
+ * apps that have review jobs but no open PR still show up. Sorted by count
+ * desc, then name. Like filtering, this reads only the small meta files.
+ */
+export function listJobApps(config) {
+  const jobsDir = config.dirs.jobs;
+  if (!existsSync(jobsDir)) return { apps: [] };
+  const counts = new Map();
+  for (const name of readdirSync(jobsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((n) => !n.startsWith("."))) {
+    const app = appOfJob(config, name);
+    if (app) counts.set(app, (counts.get(app) || 0) + 1);
+  }
+  const apps = [...counts.entries()]
+    .map(([app, count]) => ({ app, count }))
+    .sort((a, b) => b.count - a.count || a.app.localeCompare(b.app));
+  return { apps };
 }
 
 // Pipeline stages that mean a review is in flight. On boot any job stuck in one

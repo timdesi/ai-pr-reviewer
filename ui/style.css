@@ -286,12 +286,30 @@ table.artifacts tr.file-row:hover { background: var(--bg3); }
 #mode-toggle button.active { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
 
 .app-filter { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-.app-filter label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-.app-filter select {
-  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 12px;
+.app-filter label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); flex: none; }
+.app-combobox { flex: 1; min-width: 0; position: relative; }
+.app-filter input[type="text"] {
+  width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 24px 5px 8px;
+  font-size: 12px;
 }
-.app-filter select:focus { outline: none; border-color: var(--accent); }
+.app-filter input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.app-filter-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; color: var(--dim); cursor: pointer; font-size: 12px;
+  padding: 2px 4px; border-radius: 6px; line-height: 1;
+}
+.app-filter-clear:hover { color: var(--text); background: var(--bg3); }
+.app-filter-list {
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px);
+  list-style: none; margin: 0; padding: 4px; max-height: 300px; overflow-y: auto;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+}
+.app-filter-list li { padding: 6px 9px; border-radius: 7px; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-filter-list li:hover, .app-filter-list li.active { background: var(--bg3); }
+.app-filter-list li.selected { color: var(--accent); font-weight: 600; }
+.app-filter-list li.app-empty { cursor: default; color: var(--dim); }
 
 #pulls-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
 #pulls-list li { padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; margin-bottom: 4px; }

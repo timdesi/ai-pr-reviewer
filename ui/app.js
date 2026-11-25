@@ -8,6 +8,7 @@ const state = {
   mode: "pulls", // "pulls" | "jobs"
   pulls: [], // grouped per-PR view from /api/pulls
   appFilter: "", // "" = all apps, else "PROJECT/repo"
+  jobApps: {}, // app -> job count from /api/jobs/apps (for the app filter)
   prContext: null, // pull key whose review(s) are shown in the job view
   pullReviewOpen: false, // header review-switcher menu open?
   tab: "overview",
@@ -144,9 +145,11 @@ function inline(s) {
 async function fetchJobs() {
   try {
     // Server-side pagination keeps the payload small (no huge status blobs) and
-    // keeps the list cheap even with a large job store (issue #6).
+    // keeps the list cheap even with a large job store (issue #6). An active
+    // app filter is applied server-side, before pagination.
     const offset = (state.jobPage - 1) * PAGE_SIZE;
-    const r = await fetch(`/api/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
+    const appQ = state.appFilter ? `&app=${encodeURIComponent(state.appFilter)}` : "";
+    const r = await fetch(`/api/jobs?limit=${PAGE_SIZE}&offset=${offset}${appQ}`);
     const j = await r.json();
     state.jobs = j.jobs || [];
     state.jobTotal = typeof j.total === "number" ? j.total : state.jobs.length;
@@ -196,6 +199,9 @@ function renderListPager({ listEl, pagerEl, page, total, onNav }) {
 function renderJobList() {
   const ul = $("#job-list");
   ul.innerHTML = "";
+  // Keep the app picker in sync with jobs data (counts + server-filtered page).
+  renderAppFilter();
+  if (state.mode === "jobs") ensureJobApps();
   if (!state.jobs.length) {
     ul.appendChild(el("li", "dim", "No jobs yet."));
     renderListPager({ listEl: ul, pagerEl: $("#job-pager"), page: state.jobPage, total: 0, onNav: noop });
@@ -263,10 +269,11 @@ function switchMode(mode) {
     contextNav.textContent = mode === "context" ? "← Close context" : "🧠 Context";
     contextNav.title = mode === "context" ? "Close context editor and go back" : "Edit per-repo / project / stack review context";
   }
-  // Left sidebar stays visible in every mode.
+  // Left sidebar stays visible in every mode. The app filter applies to both
+  // the PRs and the Jobs list (client-side for PRs, server-side for jobs).
   $("#pulls-list").hidden = listMode !== "pulls";
   $("#job-list").hidden = listMode !== "jobs";
-  $("#app-filter-row").hidden = listMode !== "pulls";
+  $("#app-filter-row").hidden = listMode !== "pulls" && listMode !== "jobs";
   $("#pulls-pager").hidden = true;
   $("#job-pager").hidden = true;
   if (listMode === "pulls") renderPulls();
@@ -317,18 +324,163 @@ async function fetchPulls(opts) {
   }
 }
 
-function renderAppFilter() {
-  const sel = $("#app-filter");
-  const current = sel.value || state.appFilter;
-  const apps = [...new Set(state.pulls.map((p) => p.app))].sort();
-  sel.innerHTML = "";
-  sel.appendChild(new Option("All apps", ""));
-  for (const app of apps) {
-    const n = state.pulls.filter((p) => p.app === app).length;
-    sel.appendChild(new Option(`${app} (${n})`, app));
+// ---------- app filter (searchable combobox over PRs / Jobs) -----------------
+
+// Module-level combobox state: `appFilterQuery === null` means the input shows
+// the current selection (not a live search filter).
+let appFilterQuery = null;
+let appFilterOpen = false;
+let appFilterActive = -1; // highlighted row index
+let jobAppsLastFetched = 0; // ms timestamp of the last /api/jobs/apps fetch
+
+// Per-app PR counts from the live pulls list.
+function pullAppCounts() {
+  const m = new Map();
+  for (const p of state.pulls || []) m.set(p.app, (m.get(p.app) || 0) + 1);
+  return m;
+}
+
+// Per-app job counts from GET /api/jobs/apps (cached in state.jobApps).
+function jobAppCounts() {
+  return new Map(Object.entries(state.jobApps || {}));
+}
+
+// All apps for the picker: the union of pull + job apps (sorted by total
+// activity, then name). The current selection is kept even when its data has
+// disappeared so a stale filter can still be seen and cleared.
+function unionAppList() {
+  const pulls = pullAppCounts();
+  const jobs = jobAppCounts();
+  const apps = new Map();
+  for (const app of new Set([...pulls.keys(), ...jobs.keys()])) {
+    if (!app) continue;
+    apps.set(app, { app, pr: pulls.get(app) || 0, jobs: jobs.get(app) || 0 });
   }
-  if (apps.includes(current)) sel.value = current;
-  state.appFilter = sel.value;
+  const list = [...apps.values()];
+  if (state.appFilter && !apps.has(state.appFilter)) {
+    list.push({ app: state.appFilter, pr: 0, jobs: 0 });
+  }
+  list.sort((a, b) => b.pr + b.jobs - (a.pr + a.jobs) || a.app.localeCompare(b.app));
+  return list;
+}
+
+// The count shown next to an app depends on which list (PRs / Jobs) is shown.
+function appModeCount(a) {
+  return state.mode === "jobs" ? a.jobs : a.pr;
+}
+
+function currentAppTotal() {
+  return unionAppList().reduce((s, a) => s + appModeCount(a), 0);
+}
+
+const appListEl = () => $("#app-filter-list");
+const appInputEl = () => $("#app-filter-input");
+
+function renderAppFilterList() {
+  const ul = appListEl();
+  if (!ul) return;
+  ul.innerHTML = "";
+  const q = (appFilterQuery ?? "").trim().toLowerCase();
+  const apps = unionAppList().filter((a) => !q || a.app.toLowerCase().includes(q));
+  let i = 0;
+  const add = (app, count, isAll) => {
+    const li = el(
+      "li",
+      `app-option${i === appFilterActive ? " active" : ""}${state.appFilter === app ? " selected" : ""}`,
+      isAll ? (count ? `All apps (${count})` : "All apps") : `${app} (${count})`,
+    );
+    li.dataset.app = app;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(state.appFilter === app));
+    li.onmousedown = (e) => {
+      e.preventDefault(); // keep focus in the input, then select
+      setAppFilter(app);
+    };
+    li.onmouseenter = () => {
+      appFilterActive = i;
+      highlightAppOption();
+    };
+    ul.appendChild(li);
+    i += 1;
+  };
+  add("", currentAppTotal(), true); // "All apps" first, with the current list's total
+  for (const a of apps) add(a.app, appModeCount(a), false);
+  if (!apps.length) ul.appendChild(el("li", "app-empty", "No apps match."));
+  ul.hidden = false;
+  appInputEl().setAttribute("aria-expanded", "true");
+}
+
+function highlightAppOption() {
+  const ul = appListEl();
+  [...ul.children].forEach((li, n) => li.classList.toggle("active", n === appFilterActive));
+}
+
+function openAppList() {
+  if (appFilterOpen) return renderAppFilterList();
+  appFilterOpen = true;
+  ensureJobApps();
+  renderAppFilterList();
+}
+
+function closeAppList() {
+  if (!appFilterOpen) return;
+  appFilterOpen = false;
+  appFilterQuery = null;
+  appFilterActive = -1;
+  const input = appInputEl();
+  if (input) {
+    input.value = state.appFilter || "";
+    input.placeholder = state.appFilter ? "" : "All apps — type to filter";
+    input.setAttribute("aria-expanded", "false");
+  }
+  const ul = appListEl();
+  if (ul) ul.hidden = true;
+}
+
+// Applies a picker selection: updates UI state, then re-renders the active
+// list. Jobs are server-paginated, so filtering them means a fresh fetch
+// (server filters before pagination); PRs are filtered client-side.
+function setAppFilter(app) {
+  state.appFilter = app || "";
+  closeAppList();
+  if (state.mode === "jobs") {
+    state.jobPage = 1;
+    fetchJobs();
+  } else {
+    state.pullPage = 1;
+    renderPulls();
+  }
+}
+
+function renderAppFilter() {
+  const input = appInputEl();
+  if (!input) return;
+  // The input shows the current selection unless the user is mid-search.
+  if (appFilterQuery === null) {
+    input.value = state.appFilter || "";
+    input.placeholder = state.appFilter ? "" : "All apps — type to filter";
+  }
+  const clear = $("#app-filter-clear");
+  if (clear) clear.hidden = !state.appFilter;
+  if (appFilterOpen) renderAppFilterList();
+}
+
+// Best-effort per-app job counts for the picker (non-fatal, TTL-cached so the
+// get-all-apps scan only runs when actually needed, not every poll).
+async function ensureJobApps() {
+  const now = Date.now();
+  if (now - jobAppsLastFetched < 15000) return;
+  jobAppsLastFetched = now;
+  try {
+    const r = await fetch("/api/jobs/apps");
+    if (!r.ok) throw new Error(`/api/jobs/apps HTTP ${r.status}`);
+    const j = await r.json();
+    state.jobApps = {};
+    for (const a of j.apps || []) state.jobApps[a.app] = a.count;
+    if (appFilterOpen) renderAppFilterList();
+  } catch {
+    jobAppsLastFetched = 0; // retry on next open
+  }
 }
 
 function pullBadge(p) {
@@ -2155,9 +2307,62 @@ $("#context-nav").addEventListener("click", () => {
   }
 });
 
-$("#app-filter").addEventListener("change", (e) => {
-  state.appFilter = e.target.value;
-  renderPulls();
+// --- app picker (searchable combobox over PRs / Jobs) ------------------------
+
+$("#app-filter-input").addEventListener("focus", () => {
+  // Select the current app text so typing a fresh search replaces it.
+  const input = appInputEl();
+  if (input.value === state.appFilter) input.select();
+  openAppList();
+});
+
+$("#app-filter-input").addEventListener("input", (e) => {
+  appFilterQuery = e.target.value;
+  appFilterActive = -1;
+  appFilterOpen = true;
+  renderAppFilterList();
+});
+
+$("#app-filter-input").addEventListener("keydown", (e) => {
+  const options = [...appListEl().children];
+  const count = options.length;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (!appFilterOpen) openAppList();
+    else if (count) {
+      appFilterActive = (appFilterActive + 1) % count;
+      highlightAppOption();
+    }
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (appFilterOpen && count) {
+      appFilterActive = (appFilterActive - 1 + count) % count;
+      highlightAppOption();
+    }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (!appFilterOpen) return openAppList();
+    // Pick the highlighted row, else the first app match (row 0 is "All
+    // apps"), else "All apps" when that's all that remains.
+    let idx = appFilterActive;
+    if (idx < 0) idx = count > 1 ? 1 : count === 1 ? 0 : -1;
+    const opt = options[idx];
+    if (opt && opt.dataset.app !== undefined) setAppFilter(opt.dataset.app);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeAppList();
+  }
+});
+
+$("#app-filter-input").addEventListener("blur", () => {
+  // Options are picked via mousedown → preventDefault, so the input does not
+  // blur when one is clicked; a blur means the user clicked elsewhere.
+  setTimeout(closeAppList, 120);
+});
+
+$("#app-filter-clear").addEventListener("click", () => {
+  setAppFilter("");
+  appInputEl().focus();
 });
 
 // Review-switcher (custom dropdown) inside the job header — rebuilt on every
