@@ -666,6 +666,7 @@ const contextDrafts = {}; // file -> unsaved textarea text
 const contextNotes = {}; // file -> developer notes for AI drafting (kept per file)
 let contextGenOpen = false; // is the AI-draft notes panel expanded?
 let contextGenRunning = false; // a generation call is in flight
+let contextGenFile = null; // which file the in-flight generation belongs to
 
 function contextStatus(msg, kind = "error") {
   const n = el("div", `notice ${kind}`, msg);
@@ -797,7 +798,15 @@ function renderContextView() {
     view.appendChild(layout);
 
     // Re-open the previously selected doc (kept across refreshes/mode switches).
-    if (contextCurrent) openContextFile(contextCurrent.file, { quiet: true });
+    if (contextCurrent) {
+      openContextFile(contextCurrent.file, {
+        quiet: true,
+        // Forward the repo identity so a per-repo file keeps its AI-draft
+        // action after a refresh or a Stats/Context round trip.
+        project: contextCurrent.project,
+        repo: contextCurrent.repo,
+      });
+    }
   };
   if (contextDocs) build(contextDocs);
   else fetchContextDocs().then(build);
@@ -833,6 +842,7 @@ async function openRepoFromInput() {
 function setContextEditor({ file, exists, text, fresh, project = null, repo = null }) {
   contextCurrent = { file, exists, fresh, project, repo };
   contextGenRunning = false;
+  contextGenFile = null;
   contextGenOpen = !!contextNotes[file] || false; // reopen the notes panel when notes survive
   const view = $("#context-view");
   const form = view.querySelector(".context-editor");
@@ -900,7 +910,9 @@ function buildContextGenPanel(form, ta) {
   panel.appendChild(
     el("div", "context-gen-title", "✦ Draft with AI — paste false positives or what the bot should know; the agent writes the whole file from them"),
   );
-  if (contextGenRunning) {
+  // "Generating…" only while the ACTIVE editor is the file being generated —
+  // after the user switches files, the other file is not generating.
+  if (contextGenRunning && contextGenFile === contextCurrent?.file) {
     panel.appendChild(el("p", "dim context-gen-status", "Generating… this can take a minute."));
     return;
   }
@@ -931,32 +943,61 @@ async function generateContextDraftInUi(form, ta, notes) {
   if (!project || !repo) {
     return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
   }
+  const reqFile = file;
   const existing = ta.value || "";
+  // Send the platform the repo is known on (from repos seen in reviews) so a
+  // GitHub repo is never drafted as Bitbucket; omit it for unseen repos and
+  // let the server pick whichever backend is configured.
+  const known = (state.pulls || []).find((p) => p.app === `${project}/${repo}`);
   contextGenRunning = true;
+  contextGenFile = reqFile;
   contextGenOpen = true;
   buildContextGenPanel(form, ta);
+
+  let res;
   try {
     const r = await fetch("/api/contexts/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project, repo, notes, existing }),
+      body: JSON.stringify({ project, repo, notes, existing, platform: known?.platform }),
     });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error || `/api/contexts/generate HTTP ${r.status}`);
-    // The draft replaces the editor text and is kept as an unsaved draft.
-    contextDrafts[file] = j.text;
-    ta.value = j.text;
-    if (!exists) contextCurrent.fresh = true;
-    contextGenRunning = false;
-    buildContextGenPanel(form, ta);
-    const st = panelStatus(form);
-    if (st) st.textContent = `AI drafted the file with ${j.model || "the context model"} — review it, then Save.`;
-    contextStatus(`AI drafted ${file}. Review it, then Save to make it live.`, "ok");
+    res = { ok: r.ok, error: r.ok ? null : j.error || `HTTP ${r.status}`, text: j.text, model: j.model };
   } catch (e) {
-    contextGenRunning = false;
-    buildContextGenPanel(form, ta);
-    contextStatus(`Generation failed: ${e.message}`, "error");
+    res = { ok: false, error: e.message };
   }
+
+  // Only this request clears the in-flight flags — never a stale sibling.
+  if (contextGenFile === reqFile) {
+    contextGenRunning = false;
+    contextGenFile = null;
+  }
+  // Cache the draft for its file no matter which editor is visible now.
+  if (res.ok) contextDrafts[reqFile] = res.text;
+  // Stale response: the user switched files while this generation ran. Only
+  // report it — never rebuild the other file's editor; the draft reappears on
+  // reopen.
+  if (contextCurrent?.file !== reqFile) {
+    contextStatus(
+      res.ok
+        ? `AI drafted ${reqFile} (you switched files) — kept as a draft; open it to review.`
+        : `Generation failed for ${reqFile}: ${res.error} (you switched files).`,
+      res.ok ? "ok" : "error",
+    );
+    return;
+  }
+  // Back to the notes+button state (the flags are already cleared above).
+  buildContextGenPanel(form, ta);
+  if (!res.ok) {
+    contextStatus(`Generation failed for ${reqFile}: ${res.error}`, "error");
+    return;
+  }
+  // The draft replaces the editor text and is kept as an unsaved draft.
+  ta.value = res.text;
+  if (!exists) contextCurrent.fresh = true;
+  const st = panelStatus(form);
+  if (st) st.textContent = `AI drafted the file with ${res.model || "the context model"} — review it, then Save.`;
+  contextStatus(`AI drafted ${file}. Review it, then Save to make it live.`, "ok");
 }
 
 function panelStatus(form) {
@@ -966,17 +1007,23 @@ function panelStatus(form) {
 async function saveContextFile() {
   const file = contextCurrent?.file;
   if (!file) return contextStatus("No file selected.", "error");
-  const text = $("#context-view textarea.artifact")?.value ?? "";
+  const snapshot = $("#context-view textarea.artifact")?.value ?? "";
   try {
     const r = await fetch("/api/contexts/doc", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file, text }),
+      body: JSON.stringify({ file, text: snapshot }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-    delete contextDrafts[file];
-    contextCurrent = { file: j.file, exists: true, fresh: false };
+    // Only drop the local draft if it still matches what we saved — edits made
+    // while the PUT was in flight are newer than the stored text and survive.
+    if (contextDrafts[file] === snapshot) delete contextDrafts[file];
+    // Keep the repo identity (the ✨ AI draft needs project/repo) and never
+    // clobber a newer selection if the user switched files mid-save.
+    if (contextCurrent?.file === file) {
+      contextCurrent = { ...contextCurrent, file: j.file, exists: true, fresh: false };
+    }
     await fetchContextDocs().then(() => {
       updateRepoSuggestions();
       renderContextView();
@@ -2088,11 +2135,13 @@ $("#mode-toggle").addEventListener("click", (e) => {
 });
 
 // The header Stats button toggles the (full-width) statistics page on/off,
-// returning to the PR or Jobs mode that was active before it was opened.
+// returning to the PR or Jobs mode that was active before it was opened. Only
+// a PR/Jobs mode updates prevMode — toggling Stats↔Context must not forget
+// the list the user actually came from.
 $("#stats-nav").addEventListener("click", () => {
   if (state.mode === "stats") switchMode(state.prevMode || "pulls");
   else {
-    state.prevMode = state.mode;
+    if (state.mode === "pulls" || state.mode === "jobs") state.prevMode = state.mode;
     switchMode("stats");
   }
 });
@@ -2101,7 +2150,7 @@ $("#stats-nav").addEventListener("click", () => {
 $("#context-nav").addEventListener("click", () => {
   if (state.mode === "context") switchMode(state.prevMode || "pulls");
   else {
-    state.prevMode = state.mode;
+    if (state.mode === "pulls" || state.mode === "jobs") state.prevMode = state.mode;
     switchMode("context");
   }
 });

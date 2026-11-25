@@ -9,6 +9,7 @@ import {
   extractContextMarkdown,
   buildContextGenMessage,
   generateContextDraft,
+  normalizeContextGenPlatform,
 } from "../src/contextGen.js";
 import { ContextEditorError } from "../src/contextsEditor.js";
 import { renderAgents } from "../scripts/build-agents.mjs";
@@ -46,6 +47,15 @@ test("extractContextMarkdown undresses a stray fence but keeps plain text", () =
   assert.equal(extractContextMarkdown("# h\n\ntext"), "# h\n\ntext");
   assert.equal(extractContextMarkdown("  \n# h\n  \n"), "# h");
   assert.equal(extractContextMarkdown("```\n{x}\n```"), "{x}");
+});
+
+test("normalizeContextGenPlatform: explicit wins, absent picks a configured backend", () => {
+  assert.equal(normalizeContextGenPlatform("github", {}), "github");
+  assert.equal(normalizeContextGenPlatform("bitbucket", {}), "bitbucket");
+  assert.equal(normalizeContextGenPlatform(undefined, { bitbucket: {}, github: {} }), "bitbucket", "bitbucket preferred when both");
+  assert.equal(normalizeContextGenPlatform(undefined, { github: {} }), "github", "github-only instance resolves to github");
+  assert.equal(normalizeContextGenPlatform("", { github: {} }), "github", "empty string also auto-resolves");
+  assert.equal(normalizeContextGenPlatform(undefined, {}), "bitbucket", "no backend → bitbucket default");
 });
 
 test("buildContextGenMessage includes identity, notes, existing, AGENTS.md", () => {
@@ -153,7 +163,13 @@ test("server POST /api/contexts/generate returns the AI draft (injectable runner
     const ok = await fetch(`${base}/api/contexts/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project: "ACME", repo: "widgets", notes: "false positive: BEN reuse", existing: "" }),
+      body: JSON.stringify({
+        project: "ACME",
+        repo: "widgets",
+        notes: "false positive: BEN reuse",
+        existing: "",
+        platform: "github",
+      }),
     });
     assert.equal(ok.status, 200);
     const j = await ok.json();
@@ -161,7 +177,7 @@ test("server POST /api/contexts/generate returns the AI draft (injectable runner
     assert.equal(draftArgs.project, "ACME");
     assert.equal(draftArgs.repo, "widgets");
     assert.equal(draftArgs.notes, "false positive: BEN reuse");
-    assert.equal(draftArgs.platform, "bitbucket");
+    assert.equal(draftArgs.platform, "github", "route forwards the platform unchanged for the runner to resolve");
 
     // The route never saves: the config's contexts dir must remain empty.
     assert.deepEqual(listDir(dir), []);

@@ -17,14 +17,15 @@
 // HTML comments and empty headings are stripped later by cleanContextText()
 // when the field is built, so what the editor shows is exactly what is saved.
 
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, mkdirSync, unlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import { log } from "./log.js";
 
-// Project keys / repo slugs on both platforms (Bitbucket keys, GitHub owner &
-// repo slugs) are word characters plus `-` and `_`.
-const NAME_RE = /^[A-Za-z0-9_-]+$/;
+// Project keys / repo slugs on both platforms allow word characters plus `-`,
+// `_` and `.` (repo slugs like `service.api` or `.github` are legal on both
+// platforms and parsePrRef already accepts them — the editor must too).
+const NAME_RE = /^[A-Za-z0-9._-]+$/;
 // Hard size cap so a misbehaving client cannot fill the pod's disk.
 const MAX_CONTEXT_BYTES = 512 * 1024;
 
@@ -54,20 +55,66 @@ export function validProjectRepo(project, repo) {
  * `dir`, or `null` when it is not acceptable. Allowed shapes:
  *   `<name>.md`            (top-level, project-wide / per-repo)
  *   `stacks/<name>.md`     (stack rules)
- * where `<name>` is `[A-Za-z0-9_-]+`. `..`, absolute paths, hidden files and
- * anything but `.md` are rejected.
+ * where `<name>` is `[A-Za-z0-9._-]+` (no leading `.`, so hidden files stay
+ * out). `..`, absolute paths, hidden files and anything but `.md` are
+ * rejected — and, because `path.resolve` is lexical only, so is any path whose
+ * *canonical* location (after following symlinks) escapes the contexts dir.
  */
 export function safeContextFile(dir, file) {
   if (typeof file !== "string" || !file) return null;
   if (file.includes("\0")) return null;
   const rel = file.replace(/\\/g, "/");
   if (rel.startsWith("/") || rel.includes("..")) return null;
-  const m = rel.match(/^(stacks\/)?([A-Za-z0-9_-]+)\.md$/);
+  const m = rel.match(/^(stacks\/)?([A-Za-z0-9._-]+)\.md$/);
   if (!m) return null;
+  if (m[2].startsWith(".")) return null; // hidden file
   const abs = path.resolve(dir, rel);
   const base = path.resolve(dir);
   if (abs !== base && !abs.startsWith(base + path.sep)) return null;
+  if (!containedInContextDir(dir, abs)) return null;
   return abs;
+}
+
+/**
+ * Is `abs` (a resolved path under `dir`) inside the *canonical* contexts root?
+ * `path.resolve` checks containment lexically and does not follow symlinks: a
+ * Markdown file that is a symlink, or a symlinked `stacks/` directory, could
+ * otherwise let reads/writes/deletes operate outside `REVIEW_CONTEXT_DIR` —
+ * defeating the API's filesystem safety boundary. Resolve symlinks with
+ * `realpathSync` on the file itself when present, else on its nearest existing
+ * ancestor, and require the canonical result to stay under the canonical root
+ * (a not-yet-existing root can contain nothing, so the lexical check alone is
+ * enough there). The caller re-checks under the same invariants and only
+ * touches `abs` afterwards, so the boundary holds across read/write/delete.
+ */
+function containedInContextDir(dir, abs) {
+  const root = path.resolve(dir);
+  let rootReal;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    return true; // root doesn't exist yet — no symlink can hide under it
+  }
+  let target;
+  try {
+    if (existsSync(abs)) {
+      target = realpathSync(abs); // resolves a symlinked file itself
+    } else if (existsSync(path.dirname(abs))) {
+      target = realpathSync(path.dirname(abs)); // resolves a symlinked parent (e.g. stacks/)
+    } else {
+      // deepest existing ancestor (the file's parent-dir chain not created yet)
+      let a = path.dirname(abs);
+      while (!existsSync(a)) {
+        const p = path.dirname(a);
+        if (p === a) return false;
+        a = p;
+      }
+      target = realpathSync(a);
+    }
+  } catch {
+    return false; // vanished between the check and the realpath — treat as unsafe
+  }
+  return target === rootReal || target.startsWith(rootReal + path.sep);
 }
 
 /**
@@ -97,7 +144,7 @@ export function readContextDoc(dir, file) {
 /** Read the resolved per-repo context for PROJECT/repo (create-target on miss). */
 export function getRepoContext(dir, project, repo) {
   if (!validProjectRepo(project, repo)) {
-    throw new ContextEditorError(400, "project and repo must be alphanumeric, `-` or `_`");
+    throw new ContextEditorError(400, "project and repo must be letters, digits, `-`, `_` or `.`");
   }
   const file = resolveRepoContextFile(dir, project, repo);
   return readContextDoc(dir, file);
@@ -140,7 +187,7 @@ export function writeContextDoc(dir, { file, text }) {
 /** Create or update the per-repo context for PROJECT/repo (fallback-aware). */
 export function writeRepoContext(dir, { project, repo, text }) {
   if (!validProjectRepo(project, repo)) {
-    throw new ContextEditorError(400, "project and repo must be alphanumeric, `-` or `_`");
+    throw new ContextEditorError(400, "project and repo must be letters, digits, `-`, `_` or `.`");
   }
   const file = resolveRepoContextFile(dir, project, repo);
   return writeContextDoc(dir, { file, text });
@@ -164,10 +211,13 @@ export function deleteContextDoc(dir, file) {
  * Enumerate every curated context file under `dir`, classified for the UI:
  *   - `stacks`: `<name>` + parsed `match:` patterns (null when absent/broken)
  *   - `top`: each other `.md` file with a `kind` — `"project"` when its name
- *     prefixes other files (`ACME.md` + `ACME-<repo>.md`), `"repo"` when
- *     it is `<PROJECT>-<repo>.md` under such a project, else `"file"`.
+ *     prefixes other files (`ACME.md` + `ACME-<repo>.md`), `"repo"` when it is
+ *     `<PROJECT>-<repo>.md` (split via the project-wide file when one exists,
+ *     else on the first `-` — project-wide context is optional, so a lone
+ *     per-repo file is still recognized), else `"file"`.
  * A missing/unreadable dir yields an empty listing (never an error), matching
- * the project's non-fatal, best-effort convention.
+ * the project's non-fatal, best-effort convention. A symlinked `stacks/` that
+ * escapes the contexts dir is not enumerated (containment boundary).
  */
 export function listContextDocs(dir) {
   let entries = [];
@@ -177,37 +227,49 @@ export function listContextDocs(dir) {
     return { dir, stacks: [], top: [] };
   }
   const top = entries
-    .filter((n) => /^[A-Za-z0-9_-]+\.md$/.test(n))
+    .filter((n) => !n.startsWith(".") && /^[A-Za-z0-9._-]+\.md$/.test(n))
     .sort()
     .map((n) => ({ file: n, name: n.replace(/\.md$/, "") }));
 
   const stacks = [];
   try {
-    for (const n of readdirSync(path.join(dir, "stacks")).sort()) {
-      if (!/^[A-Za-z0-9_-]+\.md$/.test(n)) continue;
-      const file = `stacks/${n}`;
-      let match = null;
-      try {
-        const raw = readFileSync(path.join(dir, file), "utf8");
-        const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-        const line = fm?.[1].match(/^match:\s*(\[.*\])\s*$/m);
-        if (line) match = JSON.parse(line[1]);
-      } catch {
-        /* broken stack front matter — still listed, match left null */
+    if (containedInContextDir(dir, path.join(dir, "stacks"))) {
+      for (const n of readdirSync(path.join(dir, "stacks")).sort()) {
+        if (n.startsWith(".") || !/^[A-Za-z0-9._-]+\.md$/.test(n)) continue;
+        const file = `stacks/${n}`;
+        let match = null;
+        try {
+          const raw = readFileSync(path.join(dir, file), "utf8");
+          const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+          const line = fm?.[1].match(/^match:\s*(\[.*\])\s*$/m);
+          if (line) match = JSON.parse(line[1]);
+        } catch {
+          /* broken stack front matter — still listed, match left null */
+        }
+        stacks.push({ file, name: n.replace(/\.md$/, ""), match });
       }
-      stacks.push({ file, name: n.replace(/\.md$/, ""), match });
     }
   } catch {
     /* no stacks dir yet */
   }
 
-  // A file is project-wide when it prefixes another top-level file.
+  // A file is project-wide when its name prefixes another top-level file.
   const projects = top.filter((t) => top.some((o) => o.name.startsWith(`${t.name}-`))).map((t) => t.name);
   const classified = top.map((t) => {
     const project = projects.find((p) => t.name === p || t.name.startsWith(`${p}-`));
-    if (!project) return { ...t, kind: "file" };
-    if (t.name === project) return { ...t, kind: "project", project };
-    return { ...t, kind: "repo", project, repo: t.name.slice(project.length + 1) };
+    if (project) {
+      if (t.name === project) return { ...t, kind: "project", project };
+      return { ...t, kind: "repo", project, repo: t.name.slice(project.length + 1) };
+    }
+    // No project-wide file: a lone `<PROJECT>-<repo>.md` may still be a
+    // per-repo context (loadProjectContext reads it for PROJECT/repo). Split
+    // only when the project segment looks like a real project key — Bitbucket
+    // keys are uppercase (ACME). A lowercase first segment is a
+    // `<repo>.md` fallback or a project-wide file that happens to contain a
+    // dash, so it stays generic (still openable via the PROJECT/repo box).
+    const lone = t.name.match(/^([A-Z][A-Z0-9]*)-(.+)$/);
+    if (lone) return { ...t, kind: "repo", project: lone[1], repo: lone[2] };
+    return { ...t, kind: "file" };
   });
   return { dir, stacks, top: classified };
 }

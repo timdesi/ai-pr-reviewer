@@ -44,6 +44,19 @@ function configuredClients(config) {
   }
 }
 
+/**
+ * Resolve the platform used to fetch the repo's AGENTS.md. An absent (or
+ * unknown) platform picks whichever backend is actually configured — bitbucket
+ * first (backward compatible), then github — so a GitHub-only instance still
+ * gets its AGENTS.md grounding without the dashboard sending a platform.
+ */
+export function normalizeContextGenPlatform(platform, clients = {}) {
+  if (platform === "github" || platform === "bitbucket") return platform;
+  if (clients.bitbucket) return "bitbucket";
+  if (clients.github) return "github";
+  return "bitbucket";
+}
+
 // The repo's own AGENTS.md at the default branch — the exact file context.js
 // attaches to every review there. Non-fatal: any failure → null.
 async function fetchRepoAgentsMd(config, { platform, projectKey, repoSlug }) {
@@ -98,12 +111,13 @@ export function extractContextMarkdown(raw) {
  * Never writes anything to disk: returns `{ ok, text, model, usage,
  * durationMs }` and the caller (dashboard) shows it as an editable draft.
  * `runner` and `agentsMd` are injectable for tests (defaults: real runAgent,
- * best-effort AGENTS.md fetch). Throws ContextEditorError on validation /
- * agent failure so the API can map it to a clean HTTP status.
+ * best-effort AGENTS.md fetch). `platform` is "bitbucket"/"github", or absent
+ * to resolve from whichever backend is configured. Throws ContextEditorError
+ * on validation / agent failure so the API can map it to a clean HTTP status.
  */
-export async function generateContextDraft({ config, project, repo, notes = "", existing = "", platform = "bitbucket", runner = runAgent, agentsMd }) {
+export async function generateContextDraft({ config, project, repo, notes = "", existing = "", platform, runner = runAgent, agentsMd }) {
   if (!validProjectRepo(project, repo)) {
-    throw new ContextEditorError(400, "project and repo must be alphanumeric, `-` or `_`");
+    throw new ContextEditorError(400, "project and repo must be letters, digits, `-`, `_` or `.`");
   }
   const model = pickContextGenModel(config);
   if (!model) {
@@ -120,7 +134,7 @@ export async function generateContextDraft({ config, project, repo, notes = "", 
   }
 
   const repoAgents = agentsMd === undefined
-    ? await fetchRepoAgentsMd(config, { platform, projectKey: project, repoSlug: repo })
+    ? await fetchRepoAgentsMd(config, { platform: normalizeContextGenPlatform(platform, configuredClients(config)), projectKey: project, repoSlug: repo })
     : agentsMd;
   const message = buildContextGenMessage({ project, repo, notes, existing, agentsMd: repoAgents });
 

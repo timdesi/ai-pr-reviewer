@@ -32,6 +32,17 @@ below the `v0.2.x` entries.
   listing; a broken stack front matter is listed without its `match` — nothing
   the editor does can turn a review into a hard failure, matching the project's
   optional-helpers convention. New API: `GET/PUT/DELETE /api/contexts/…`.
+- **Review-driven hardening.** Per the Copilot review on the feature PR: the
+  containment check is now canonical (`realpathSync`), so a symlinked context
+  file or `stacks/` dir pointing outside `REVIEW_CONTEXT_DIR` is rejected
+  instead of followed; repo slugs containing `.` (`service.api`, `.github`)
+  are accepted, listed and classified (they were already reviewed); a lone
+  per-repo file no longer needs its project-wide file to be recognized as such;
+  `GET /api/contexts/repo` argument bug fixed (the dashboards "Open / new"
+  flow 400'd on every request); AI drafting forwards the repo's platform;
+  stale generation/save responses can no longer clobber a different file's
+  editor or drop edits typed mid-save; Stats↔Context toggling no longer loses
+  the previous PR/Jobs view.
 - **“✨ AI draft” writes the file for you.** For any per-repo context, developers
   paste **false positives or what the bot should know** and the new `context-gen`
   opencode agent ([`prompts/context-gen-base.md`](prompts/context-gen-base.md),

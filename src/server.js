@@ -710,7 +710,7 @@ export function createServer({ config, port = config.server.port, host = config.
           return sendJson(
             res,
             200,
-            getRepoContext(contextsDir, { project: qp().get("project"), repo: qp().get("repo") }),
+            getRepoContext(contextsDir, qp().get("project"), qp().get("repo")),
           );
         } catch (err) {
           return sendContextError(res, err);
@@ -741,7 +741,7 @@ export function createServer({ config, port = config.server.port, host = config.
             repo: body.repo,
             notes: body.notes,
             existing: body.existing,
-            platform: body.platform === "github" ? "github" : "bitbucket",
+            platform: body.platform, // raw: generation resolves it (explicit or from configured backends)
           });
           return sendJson(res, 200, draft);
         } catch (err) {

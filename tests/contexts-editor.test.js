@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +63,40 @@ test("validName / validProjectRepo: strict slug shapes", () => {
   assert.equal(validName(null), false);
   assert.equal(validProjectRepo("ACME", "acme-app"), true);
   assert.equal(validProjectRepo("ACME", "../acme-app"), false);
+});
+
+test("dotted repo slugs are valid (service.api, .github) while hidden files stay out", () => {
+  assert.equal(validProjectRepo("ACME", "service.api"), true);
+  assert.equal(validProjectRepo("ACME", ".github"), true);
+  const dir = tmpDir();
+  assert.equal(safeContextFile(dir, "ACME-service.api.md"), path.join(dir, "ACME-service.api.md"));
+  assert.equal(safeContextFile(dir, "ACME-.github.md"), path.join(dir, "ACME-.github.md"));
+  // hidden files and bare dot-names remain rejected
+  assert.equal(safeContextFile(dir, ".hidden.md"), null);
+  assert.equal(safeContextFile(dir, ".md"), null);
+});
+
+test("safeContextFile: symlinked files / stacks escaping the contexts dir are rejected", () => {
+  const dir = tmpDir();
+  const outside = tmpDir();
+  writeFileSync(path.join(outside, "secret.md"), "# secret\n", "utf8");
+  seed(dir, { "legit.md": "# ok\n" });
+
+  // a symlinked FILE pointing outside the contexts dir is not a safe target
+  symlinkSync(path.join(outside, "secret.md"), path.join(dir, "leak.md"));
+  assert.equal(safeContextFile(dir, "leak.md"), null);
+  assert.throws(() => readContextDoc(dir, "leak.md"), (e) => e instanceof ContextEditorError && e.status === 400);
+
+  // a symlinked stacks/ DIR pointing outside is rejected for write/delete and
+  // not enumerated by the listing (containment boundary holds)
+  symlinkSync(outside, path.join(dir, "stacks"));
+  assert.equal(safeContextFile(dir, "stacks/secret.md"), null);
+  assert.throws(() => deleteContextDoc(dir, "stacks/secret.md"), (e) => e instanceof ContextEditorError && e.status === 400);
+  assert.equal(listContextDocs(dir).stacks.length, 0, "symlinked stacks/ is not listed");
+
+  // real files inside still resolve
+  assert.equal(safeContextFile(dir, "legit.md"), path.join(dir, "legit.md"));
+  rmSync(outside, { recursive: true, force: true });
 });
 
 test("readContextDoc: raw text, and exists=false for a missing file", () => {
@@ -188,6 +222,27 @@ test("listContextDocs: missing dir → empty listing, never an error", () => {
   assert.deepEqual(l, { dir, stacks: [], top: [] });
 });
 
+test("listContextDocs: a lone per-repo file (no project-wide file) is still classified repo", () => {
+  const dir = tmpDir();
+  seed(dir, { "ACME-widgets.md": "# a\n" });
+  const l = listContextDocs(dir);
+  const w = l.top.find((t) => t.name === "ACME-widgets");
+  assert.equal(w.kind, "repo");
+  assert.equal(w.project, "ACME");
+  assert.equal(w.repo, "widgets");
+});
+
+test("listContextDocs: dotted repo slugs are listed and classified", () => {
+  const dir = tmpDir();
+  seed(dir, { "ACME-service.api.md": "# s\n" });
+  const l = listContextDocs(dir);
+  assert.equal(l.top.length, 1);
+  assert.equal(l.top[0].name, "ACME-service.api");
+  assert.equal(l.top[0].kind, "repo");
+  assert.equal(l.top[0].project, "ACME");
+  assert.equal(l.top[0].repo, "service.api");
+});
+
 // ---- server API integration -------------------------------------------------
 
 import { loadConfig } from "../src/config.js";
@@ -235,6 +290,19 @@ test("server /api/contexts*: list, read, create, update, delete with strict vali
     // read missing doc → exists:false, not an error
     const miss = await (await fetch(`${base}/api/contexts/doc?file=${encodeURIComponent("ACME-widgets.md")}`)).json();
     assert.equal(miss.exists, false);
+
+    // GET /api/contexts/repo resolves a per-repo context (regression: the old
+    // route passed the query params as an object and 400'd every request)
+    const repoOk = await fetch(`${base}/api/contexts/repo?project=ACME&repo=acme-app`);
+    assert.equal(repoOk.status, 200);
+    const repo = await repoOk.json();
+    assert.deepEqual({ file: repo.file, exists: repo.exists }, { file: "ACME-acme-app.md", exists: true });
+    // missing → create-target name, exists:false, not an error
+    const repoMiss = await (await fetch(`${base}/api/contexts/repo?project=ACME&repo=widgets`)).json();
+    assert.deepEqual({ file: repoMiss.file, exists: repoMiss.exists }, { file: "ACME-widgets.md", exists: false });
+    // invalid → 400 (params map to the right arguments now)
+    const repoBad = await fetch(`${base}/api/contexts/repo?project=a%20b&repo=x`);
+    assert.equal(repoBad.status, 400);
 
     // traversal → 400
     const trav = await fetch(`${base}/api/contexts/doc?file=${encodeURIComponent("../secret.md")}`);
