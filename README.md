@@ -51,7 +51,7 @@ merge, decline, or code change.
 | Screenshot reading | Images pasted into the PR are transcribed by a vision model, so UI changes get reviewed too |
 | Smart re-reviews | Findings already explained in the PR discussion are marked resolved instead of re-raised |
 | Real checkout | Reviewers run against the actual commit plus your curated project context and the repo's own `AGENTS.md` — not just a diff |
-| Dashboard | Live per-agent progress, cost per review, history grouped by pull request, and a model switcher |
+| Dashboard | Live per-agent progress, cost per review, history grouped by pull request, a model switcher, and a curated-context editor |
 | Two platforms | Bitbucket Data Center and GitHub are independent backends on the same server; each PR picks its own |
 
 ## Example review
@@ -195,6 +195,20 @@ timeout limits), never provider or token values.
   `image` in the OpenCode config).
 - The consensus model reads roughly 60 KB of reviewer reports, so pick one that
   handles long context well.
+
+### Curated context
+
+Every review is fed curated context from `REVIEW_CONTEXT_DIR` — the per-repo
+files, project-wide file and stack rules in [src/context.js](src/context.js).
+The team maintains these files **from the dashboard**: the **🧠 Context** page
+lists everything on disk, opens any file for editing, lets you create a new
+`PROJECT/repo` context (started from `PROJECT-repo.md` on save), and deletes
+one (with confirmation). Saves go straight to `REVIEW_CONTEXT_DIR` and apply to
+the **next** review of that repo — no restart or redeploy. The server validates
+file names strictly (only `.md` under `REVIEW_CONTEXT_DIR`/`stacks`, no path
+traversal) and writes atomically, so a crash mid-save can't leave a truncated
+file behind. Like the rest of the dashboard this is local to the pod: edits
+land on that host's disk and are not version-controlled.
 
 ## How it works
 

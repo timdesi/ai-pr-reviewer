@@ -38,6 +38,7 @@ npm run build:agents    # regenerate .opencode/agents/ from prompts/ + scripts/b
 | `src/webhook.js` `src/webhook-github.js` | webhook entry points per platform |
 | `src/pipeline.js` | orchestrates fetch → reviewers → consensus → publish |
 | `src/context.js` | assembles review context: diff, Jira, repo `AGENTS.md`, curated `contexts/` |
+| `src/contextsEditor.js` | dashboard "Context" API: list/read/write/delete the curated context files (`REVIEW_CONTEXT_DIR`), validated + atomic |
 | `src/jira.js` | linked-ticket acceptance criteria, per-criterion verdicts |
 | `src/prImages.js` | screenshot transcription for UI changes (via the `.opencode/agents/pr-vision.md` agent, sourced from `prompts/vision-base.md`) |
 | `src/checkout.js` | real-commit checkout: shallow bare fetch into `WORKSPACE_ROOT` + per-repo worktree + disk maintenance |
