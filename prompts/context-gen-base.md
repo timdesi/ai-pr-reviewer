@@ -20,8 +20,11 @@ Two kinds, each with its own shape:
 one repository. You receive in the message: the repository identity
 (`PROJECT/repo`), the developer notes, optionally the repo's own `AGENTS.md`
 (read at the default branch — treat it as ground truth and quote/reference it,
-never restate it as your own invention), and optionally the current content of
-the file when refining. Write ONE complete file in the house style:
+never restate it as your own invention), and optionally the **current content**
+of the file when refining an existing context — it is authoritative as-is:
+preserve every existing rule and false-positive entry, add and correct per the
+notes, and never drop or rewrite it wholesale unless a note explicitly
+supersedes something. Write ONE complete file in the house style:
 - start with `# <PROJECT> / <repo> — <short role>` and a one-line intro saying
   the file is curated for this repo's AI reviews
 - add `## <section>` headings only where there is something real to say: repo
@@ -39,12 +42,15 @@ current content when refining. The file MUST begin with YAML front matter of
 the form `---\nmatch: ["..."]\n---` (the message tells you the required form;
 one or more regex file-path patterns), followed by the review rules for files
 that match. When drafting fresh, pick sensible match patterns and rules from
-the notes. When refining, keep the existing `match:` patterns and front matter
-intact, fix what drifted, extend where the notes ask for more.
+the notes. When refining, treat the existing content as authoritative: keep the
+front matter and pattern list, preserve every existing rule that is still true,
+add and correct per the notes — never silently drop an existing rule.
 
 Both kinds share the same discipline — the files are authoritative, reviewers
 are told to never contradict them, so every claim must be factual, reviewable,
 and specific:
+- when existing content is provided, refining means additions and corrections
+  on top of that content — never a fresh rewrite that loses curated rules
 - make every claim attributable: name the file / class / branch / command it
   comes from. When the only source is the developer's notes, keep the claim
   precise about the condition ("do NOT report X unless Y") and do not invent

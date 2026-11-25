@@ -92,9 +92,14 @@ export function buildContextGenMessage({ project, repo, notes = "", existing = "
     );
   }
   if (existing && existing.trim()) {
-    parts.push("Current content of the file to refine (keep what is still true, fix what drifted, extend per the notes):\n" + existing.trim());
+    parts.push(
+      "Current content of this file. It is already curated — treat it as the authoritative base and PRESERVE it: keep every existing rule and false-positive entry that is still true (never drop or rewrite the file wholesale), fix only what the notes say is wrong, add what they ask for, and remove only what a note explicitly supersedes:\n" +
+        existing.trim(),
+    );
   }
-  parts.push("Write the complete curated context Markdown file for this repository now.");
+  parts.push(
+    "Write the complete curated context Markdown file. If existing content was provided, this is a REFINEMENT of it — every still-true existing rule must survive, verbatim or better-phrased, never silently lost.",
+  );
   return parts.join("\n\n");
 }
 
@@ -110,7 +115,7 @@ export function buildStackContextGenMessage({ name, notes = "", existing = "" })
   }
   if (existing && existing.trim()) {
     parts.push(
-      "Current content of the file to refine (keep the YAML front matter and its match: patterns; keep what is still true, fix what drifted, extend per the notes):\n" +
+      "Current content of this file. It is already curated — PRESERVE it: keep the YAML front matter and its match: patterns unchanged unless the notes ask for new patterns, keep every existing rule that is still true, add per the notes, and remove only what a note explicitly supersedes:\n" +
         existing.trim(),
     );
   } else {
@@ -118,7 +123,9 @@ export function buildStackContextGenMessage({ name, notes = "", existing = "" })
       "The file must start with YAML front matter of the form:\n---\nmatch: [\"...\"]\n---\n\nwith one or more regex file-path patterns. Write review rules for files matching those patterns below the front matter.",
     );
   }
-  parts.push("Write the complete stack rules Markdown file now.");
+  parts.push(
+    "Write the complete stack rules Markdown file. If existing content was provided, this is a refinement — every still-true existing rule must survive, never silently lost.",
+  );
   return parts.join("\n\n");
 }
 

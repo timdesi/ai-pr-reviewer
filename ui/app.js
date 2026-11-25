@@ -1216,8 +1216,8 @@ function buildContextGenPanel(form, ta) {
   const hint = el("p", "dim hint");
   const stack = contextCurrent?.name != null || String(file || "").startsWith("stacks/");
   hint.innerHTML = stack
-    ? "The draft replaces the editor text. It is grounded on your notes — review it, then <b>Save</b>. Nothing is written to disk until you Save."
-    : "The draft replaces the editor text. It is grounded on your notes (and the repo’s <code>AGENTS.md</code> when readable) — review it, then <b>Save</b>. Nothing is written to disk until you Save.";
+    ? "The AI works from the current content plus your notes: existing rules and <code>match:</code> patterns stay, it adds and corrects. The full draft lands in the editor for review — the version on disk is untouched until you <b>Save</b>."
+    : "The AI works from the current content plus your notes (and the repo’s <code>AGENTS.md</code> when readable): existing rules stay, it adds and corrects. The full draft lands in the editor for review — the version on disk is untouched until you <b>Save</b>.";
   panel.appendChild(hint);
 }
 
