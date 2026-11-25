@@ -53,10 +53,22 @@
         <button id="refresh-jobs" title="Refresh">&circlearrowleft;</button>
       </div>
       <div id="app-filter-row" class="app-filter">
-        <label for="app-filter">App</label>
-        <select id="app-filter" title="Filter PRs by app (project/repo)">
-          <option value="">All apps</option>
-        </select>
+        <label for="app-filter-input">App</label>
+        <div id="app-combobox" class="app-combobox">
+          <input
+            id="app-filter-input"
+            type="text"
+            placeholder="All apps — type to filter"
+            autocomplete="off"
+            spellcheck="false"
+            role="combobox"
+            aria-expanded="false"
+            aria-autocomplete="list"
+            aria-controls="app-filter-list"
+          />
+          <button id="app-filter-clear" class="app-filter-clear" title="Clear app filter" hidden>✕</button>
+          <ul id="app-filter-list" class="app-filter-list" role="listbox" aria-label="Apps" hidden></ul>
+        </div>
       </div>
       <ul id="pulls-list"></ul>
       <div id="pulls-pager" class="pager" hidden></div>

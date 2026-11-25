@@ -85,7 +85,7 @@ test("listJobsPage returns newest-first slim jobs with total", () => {
 
 test("listJobsPage returns empty for a missing jobs dir", () => {
   const out = listJobsPage(makeConfig(path.join(tempJobsDir(), "nope")));
-  assert.deepEqual(out, { jobs: [], total: 0, limit: 50, offset: 0 });
+  assert.deepEqual(out, { jobs: [], total: 0, limit: 50, offset: 0, app: "" });
 });
 
 test("finalizeStaleJobs marks orphaned running jobs failed, leaves others alone", () => {

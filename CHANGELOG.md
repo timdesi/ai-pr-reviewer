@@ -12,6 +12,32 @@ below the `v0.2.x` entries.
  
 ## Unreleased
 
+### Searchable app filter for the PRs and Jobs lists (left sidebar)
+
+- **The "App" filter now works for both the PRs and the Jobs list.** Previously
+  it was a native dropdown that only filtered the PRs list (and was hidden in
+  Jobs mode). It is now a **searchable combobox** (type to filter `PROJECT/repo`)
+  that applies to whichever list is shown, shows a per-mode count on every row
+  ("All apps (N)" plus each app), highlights the current selection, has a **✕**
+  to clear, and keeps the selection across PRs↔Jobs switches.
+- **Jobs are filtered server-side** (`GET /api/jobs?app=PROJECT/repo` filters
+  *before* pagination), so filtered totals and pages are correct even though a
+  large job store is paged (issue #6 stays intact). A new cheap endpoint
+  (`GET /api/jobs/apps`) returns app → job-count from the small meta files, so
+  apps whose PRs are merged/gone still appear in the picker. App counts are
+  TTL-cached client-side and fetched on demand, never on every poll.
+
+### Jobs list: merged/declined PRs no longer look like active runs
+
+- A job whose PR has been merged/declined/superseded (or deleted) is now shown
+  as a **closed story**: the row is dimmed and the badge shows the PR's
+  terminal state (`merged` / `declined` / …) instead of the job's stage — so a
+  run left "in progress" at merge time stops looking active. The list
+  cross-references the PR view (including the `github:` namespace for GitHub),
+  so the two lists agree.
+- The header "run in progress" pill ignores orphaned running jobs whose PR is
+  already closed.
+
 ### Curated-context editor (dashboard)
 
 - **The team can now edit review context from the dashboard.** A new **🧠
