@@ -286,13 +286,13 @@ function switchMode(mode) {
   const statsNav = $("#stats-nav");
   if (statsNav) {
     statsNav.classList.toggle("active", mode === "stats");
-    statsNav.textContent = mode === "stats" ? "← Close stats" : "📊 Stats";
+    statsNav.textContent = mode === "stats" ? "← Close stats" : "Stats";
     statsNav.title = mode === "stats" ? "Close statistics and go back" : "Management statistics";
   }
   const contextNav = $("#context-nav");
   if (contextNav) {
     contextNav.classList.toggle("active", mode === "context");
-    contextNav.textContent = mode === "context" ? "← Close context" : "🧠 Context";
+    contextNav.textContent = mode === "context" ? "← Close context" : "Context";
     contextNav.title = mode === "context" ? "Close context editor and go back" : "Edit per-repo / project / stack review context";
   }
   // Left sidebar stays visible in every mode. The app filter applies to both
@@ -1135,9 +1135,10 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
     ),
   );
   head.appendChild(el("span", "spacer"));
-  // AI drafting only applies to per-repo files (that's what reviewers consume
-  // per repository); project-wide/stacks stay hand-written.
-  if (project && repo) {
+  // AI drafting applies to per-repo files and to stack rules (both feed
+  // reviewers); project-wide / other files stay hand-written.
+  const isStack = creatingStack || String(file || "").startsWith("stacks/");
+  if ((project && repo) || isStack) {
     const ai = el("button", "ai", "✨ AI draft");
     ai.title = "Draft or refine this file from your notes (the bot’s false positives, conventions). Result lands as a reviewable draft — nothing saved until you press Save.";
     ai.onclick = () => {
@@ -1148,12 +1149,12 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
   }
   // For a brand-new file (not yet on disk) the primary action reads "New" so
   // it's clear this writes a new file rather than updating an existing one.
-  const save = el("button", "primary", exists ? "💾 Save" : "💾 New");
+  const save = el("button", "primary", exists ? "Save" : "New");
   save.title = exists ? "Save changes to this context file" : "Create this new context file on disk";
   save.onclick = () => saveContextFile();
   head.appendChild(save);
   if (exists) {
-    const del = el("button", "danger", "🗑 Delete");
+    const del = el("button", "danger", "Delete");
     del.onclick = () => deleteContextFile();
     head.appendChild(del);
   }
@@ -1188,7 +1189,7 @@ function buildContextGenPanel(form, ta) {
   panel.innerHTML = "";
   panel.hidden = false;
   panel.appendChild(
-    el("div", "context-gen-title", "✦ Draft with AI — paste false positives or what the bot should know; the agent writes the whole file from them"),
+    el("div", "context-gen-title", "AI draft — paste false positives or what the bot should know; the agent writes the whole file from them"),
   );
   // "Generating…" only while the ACTIVE editor is the file being generated —
   // after the user switches files, the other file is not generating.
@@ -1205,7 +1206,7 @@ function buildContextGenPanel(form, ta) {
   };
   panel.appendChild(notes);
   const row = el("div", "context-gen-actions");
-  const go = el("button", "primary", "✦ Generate draft");
+  const go = el("button", "primary", "✨ Generate draft");
   go.disabled = contextGenRunning;
   go.onclick = () => generateContextDraftInUi(form, ta, notes.value);
   row.appendChild(go);
@@ -1213,22 +1214,37 @@ function buildContextGenPanel(form, ta) {
   row.appendChild(status);
   panel.appendChild(row);
   const hint = el("p", "dim hint");
-  hint.innerHTML =
-    "The draft replaces the editor text. It is grounded on your notes (and the repo’s <code>AGENTS.md</code> when readable) — review it, then <b>Save</b>. Nothing is written to disk until you Save.";
+  const stack = contextCurrent?.name != null || String(file || "").startsWith("stacks/");
+  hint.innerHTML = stack
+    ? "The draft replaces the editor text. It is grounded on your notes — review it, then <b>Save</b>. Nothing is written to disk until you Save."
+    : "The draft replaces the editor text. It is grounded on your notes (and the repo’s <code>AGENTS.md</code> when readable) — review it, then <b>Save</b>. Nothing is written to disk until you Save.";
   panel.appendChild(hint);
 }
 
 async function generateContextDraftInUi(form, ta, notes) {
-  const { file, project, repo, exists } = contextCurrent || {};
-  if (!project || !repo) {
-    return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
+  const { file, project, repo, exists, name } = contextCurrent || {};
+  // A stack is drafted by name (stacks/<name>.md — existing or being created);
+  // a per-repo file by PROJECT/repo. Everything else in the flow is shared.
+  const isStack = name != null || String(file || "").startsWith("stacks/");
+  let reqFile = file;
+  let displayFile = file;
+  let body;
+  if (isStack) {
+    const stackName = name != null ? name : String(file || "").replace(/^stacks\//, "").replace(/\.md$/i, "");
+    const resolved = resolveStackFile(stackName);
+    if (!resolved) {
+      return contextStatus("Give the stack a valid name first (letters/digits/`-`/`_`, no leading dot), then try AI draft.", "error");
+    }
+    reqFile = file; // drafts keyed by the editor's file (stacks/.new while naming)
+    displayFile = resolved;
+    body = { kind: "stack", name: stackName, notes, existing: ta.value || "" };
+  } else {
+    if (!project || !repo) {
+      return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
+    }
+    const known = (state.pulls || []).find((p) => p.app === `${project}/${repo}`);
+    body = { project, repo, notes, existing: ta.value || "", platform: known?.platform };
   }
-  const reqFile = file;
-  const existing = ta.value || "";
-  // Send the platform the repo is known on (from repos seen in reviews) so a
-  // GitHub repo is never drafted as Bitbucket; omit it for unseen repos and
-  // let the server pick whichever backend is configured.
-  const known = (state.pulls || []).find((p) => p.app === `${project}/${repo}`);
   contextGenRunning = true;
   contextGenFile = reqFile;
   contextGenOpen = true;
@@ -1239,7 +1255,7 @@ async function generateContextDraftInUi(form, ta, notes) {
     const r = await fetch("/api/contexts/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project, repo, notes, existing, platform: known?.platform }),
+      body: JSON.stringify(body),
     });
     const j = await r.json();
     res = { ok: r.ok, error: r.ok ? null : j.error || `HTTP ${r.status}`, text: j.text, model: j.model };
@@ -1260,8 +1276,8 @@ async function generateContextDraftInUi(form, ta, notes) {
   if (contextCurrent?.file !== reqFile) {
     contextStatus(
       res.ok
-        ? `AI drafted ${reqFile} (you switched files) — kept as a draft; open it to review.`
-        : `Generation failed for ${reqFile}: ${res.error} (you switched files).`,
+        ? `AI drafted ${displayFile} (you switched files) — kept as a draft; open it to review.`
+        : `Generation failed for ${displayFile}: ${res.error} (you switched files).`,
       res.ok ? "ok" : "error",
     );
     return;
@@ -1269,7 +1285,7 @@ async function generateContextDraftInUi(form, ta, notes) {
   // Back to the notes+button state (the flags are already cleared above).
   buildContextGenPanel(form, ta);
   if (!res.ok) {
-    contextStatus(`Generation failed for ${reqFile}: ${res.error}`, "error");
+    contextStatus(`Generation failed for ${displayFile}: ${res.error}`, "error");
     return;
   }
   // The draft replaces the editor text and is kept as an unsaved draft.
@@ -1277,7 +1293,7 @@ async function generateContextDraftInUi(form, ta, notes) {
   if (!exists) contextCurrent.fresh = true;
   const st = panelStatus(form);
   if (st) st.textContent = `AI drafted the file with ${res.model || "the context model"} — review it, then Save.`;
-  contextStatus(`AI drafted ${file}. Review it, then Save to make it live.`, "ok");
+  contextStatus(`AI drafted ${displayFile}. Review it, then Save to make it live.`, "ok");
 }
 
 function panelStatus(form) {

@@ -8,8 +8,11 @@ import {
   pickContextGenModel,
   extractContextMarkdown,
   buildContextGenMessage,
+  buildStackContextGenMessage,
   generateContextDraft,
+  generateStackContextDraft,
   normalizeContextGenPlatform,
+  validStackName,
 } from "../src/contextGen.js";
 import { ContextEditorError } from "../src/contextsEditor.js";
 import { renderAgents } from "../scripts/build-agents.mjs";
@@ -72,6 +75,26 @@ test("buildContextGenMessage includes identity, notes, existing, AGENTS.md", () 
   assert.match(msg, /## AGENTS/);
 });
 
+test("buildStackContextGenMessage: fresh stack demands match: front matter; refining keeps it", () => {
+  const fresh = buildStackContextGenMessage({ name: "java-spring", notes: "use HttpStatus enums" });
+  assert.match(fresh, /java-spring/);
+  assert.match(fresh, /use HttpStatus enums/);
+  assert.match(fresh, /match:/, "fresh draft is told the required front matter shape");
+  const refine = buildStackContextGenMessage({ name: "java-spring", notes: "add JPA notes", existing: "---\nmatch: ['\\.java$']\n---\n# old" });
+  assert.match(refine, /# old/, "existing content passed through");
+  assert.match(refine, /keep the YAML front matter/, "refine keeps the match: patterns intact");
+});
+
+test("validStackName matches the server's safeContextFile stack rule", () => {
+  assert.equal(validStackName("java-spring"), true);
+  assert.equal(validStackName("a.b_c"), true);
+  assert.equal(validStackName(""), false);
+  assert.equal(validStackName(".hidden"), false);
+  assert.equal(validStackName("a/b"), false);
+  assert.equal(validStackName("a b"), false);
+  assert.equal(validStackName(null), false);
+});
+
 test("generateContextDraft: runs the context-gen agent with repo + notes and returns a cleaned draft", async () => {
   let captured = null;
   const runner = async (opts) => {
@@ -119,6 +142,52 @@ test("generateContextDraft: validation and error mapping", async () => {
   // runner returns empty → 502
   await assert.rejects(
     generateContextDraft({ config, project: "A", repo: "b", agentsMd: null, runner: async () => ({ ok: true, text: "   " }) }),
+    (e) => e instanceof ContextEditorError && e.status === 502,
+  );
+});
+
+test("generateStackContextDraft: runs the context-gen agent with a stack message and returns a cleaned draft", async () => {
+  let captured = null;
+  const runner = async (opts) => {
+    captured = opts;
+    return { ok: true, text: "```markdown\n---\nmatch: [\"\\.tsx$\"]\n---\n\n# rules\n```", usage: { input: 3 }, durationMs: 40, stdout: "", stderr: "", error: null };
+  };
+  const config = baseConfig({ models: { consensus: "m/cons" } });
+  const out = await generateStackContextDraft({ config, name: "react-tsx", notes: "prefer the hook", runner });
+  assert.equal(out.ok, true);
+  assert.equal(out.text, '---\nmatch: ["\\.tsx$"]\n---\n\n# rules');
+  assert.equal(out.model, "m/cons");
+  assert.equal(captured.agent, "context-gen");
+  assert.match(captured.message, /Stack: `react-tsx`/);
+  assert.match(captured.message, /prefer the hook/);
+  assert.match(captured.message, /match:/, "fresh stack message demands the front matter");
+  assert.doesNotMatch(captured.message, /AGENTS\.md/, "no repo to ground stacks on — no AGENTS.md fetch");
+});
+
+test("generateStackContextDraft: validation and error mapping", async () => {
+  const config = baseConfig({ models: { consensus: "m/cons" } });
+  // invalid name → 400
+  await assert.rejects(
+    generateStackContextDraft({ config, name: "bad name", runner: fakeRunner() }),
+    (e) => e instanceof ContextEditorError && e.status === 400 && /stack name/.test(e.message),
+  );
+  await assert.rejects(
+    generateStackContextDraft({ config, name: "a/b", runner: fakeRunner() }),
+    (e) => e instanceof ContextEditorError && e.status === 400,
+  );
+  // no model → 400
+  await assert.rejects(
+    generateStackContextDraft({ config: baseConfig(), name: "ok", runner: fakeRunner() }),
+    (e) => e instanceof ContextEditorError && e.status === 400 && /CONTEXT_GEN_MODEL/.test(e.message),
+  );
+  // oversized notes → 413
+  await assert.rejects(
+    generateStackContextDraft({ config, name: "ok", notes: "x".repeat(33 * 1024), runner: fakeRunner() }),
+    (e) => e instanceof ContextEditorError && e.status === 413,
+  );
+  // runner failure → 502
+  await assert.rejects(
+    generateStackContextDraft({ config, name: "ok", runner: async () => ({ ok: false, error: "boom" }) }),
     (e) => e instanceof ContextEditorError && e.status === 502,
   );
 });
@@ -200,6 +269,85 @@ test("server POST /api/contexts/generate returns the AI draft (injectable runner
     });
     assert.equal(bad.status, 400);
     await new Promise((r) => server2.close(r));
+  } finally {
+    if (server) await new Promise((r) => server.close(r));
+    for (const k of envKeys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("server POST /api/contexts/generate with kind=stack dispatches to the stack draft runner", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ctx-gen-stack-"));
+  const { createServer } = await import("../src/server.js");
+  let server = null;
+  let stackArgs = null;
+  let repoArgs = null;
+  const prev = {};
+  const envKeys = ["BITBUCKET_BASE_URL", "BITBUCKET_API_TOKEN", "REVIEW_CONTEXT_DIR", "PUBLISH_TO_BITBUCKET"];
+  for (const k of envKeys) prev[k] = process.env[k];
+  try {
+    process.env.BITBUCKET_BASE_URL = "https://bb.example.com";
+    process.env.BITBUCKET_API_TOKEN = "tok";
+    process.env.REVIEW_CONTEXT_DIR = dir;
+    process.env.PUBLISH_TO_BITBUCKET = "0";
+    const config = loadConfig({ envFile: path.join(dir, ".env") });
+    config.contextGen.model = "m/cons";
+    const created = createServer({
+      config,
+      port: 0,
+      generateDraft: async (a) => {
+        repoArgs = a;
+        return { ok: true, text: "# repo\n", model: "m/cons", usage: null };
+      },
+      // Delegate through the real stack draft (validation + message build) with
+      // an injected agent runner, so the route test also covers name validation.
+      generateStackDraft: async (a) => {
+        stackArgs = a;
+        return generateStackContextDraft({
+          ...a,
+          runner: async () => ({ ok: true, text: "---\nmatch: []\n---\n\n# stack\n", usage: null, durationMs: 5, stdout: "", stderr: "", error: null }),
+        });
+      },
+    });
+    server = created.server;
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const stack = await fetch(`${base}/api/contexts/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "stack", name: "java-qr", notes: "no banner", existing: "old" }),
+    });
+    assert.equal(stack.status, 200);
+    assert.match((await stack.json()).text, /# stack/);
+    assert.equal(stackArgs.name, "java-qr");
+    assert.equal(stackArgs.notes, "no banner");
+    assert.equal(stackArgs.existing, "old");
+    assert.equal(repoArgs, null, "kind=stack never touches the repo runner");
+
+    // kind absent (or repo) still goes to the repo runner.
+    const repo = await fetch(`${base}/api/contexts/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: "ACME", repo: "widgets" }),
+    });
+    assert.equal(repo.status, 200);
+    assert.equal(repoArgs?.project, "ACME");
+    assert.equal(stackArgs?.name, "java-qr", "stack runner not called for a repo request");
+
+    // The route never saves: the config's contexts dir must remain empty.
+    assert.deepEqual(listDir(dir), []);
+
+    // Invalid stack name maps to the runner's 400 via ContextEditorError.
+    const bad = await fetch(`${base}/api/contexts/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "stack", name: "bad name" }),
+    });
+    assert.equal(bad.status, 400);
   } finally {
     if (server) await new Promise((r) => server.close(r));
     for (const k of envKeys) {

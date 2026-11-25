@@ -70,7 +70,7 @@ import {
   deleteContextDoc,
   ContextEditorError,
 } from "./contextsEditor.js";
-import { generateContextDraft } from "./contextGen.js";
+import { generateContextDraft, generateStackContextDraft } from "./contextGen.js";
 import { log } from "./log.js";
 
 const UI_DIR = path.join(import.meta.dirname, "..", "ui");
@@ -249,7 +249,7 @@ async function replyTeachForce(config, ref, triggerCommentId, previous) {
   }
 }
 
-export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview, generateDraft: draftRunner = generateContextDraft } = {}) {
+export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview, generateDraft: draftRunner = generateContextDraft, generateStackDraft: stackDraftRunner = generateStackContextDraft } = {}) {
   assertAnyBackendConfig(config);
   const clients = new Set();
   // One review runs at a time; extra requests (webhook or UI) wait in the queue.
@@ -744,14 +744,21 @@ export function createServer({ config, port = config.server.port, host = config.
       if (url === "/api/contexts/generate" && method === "POST") {
         const body = await readBody(req);
         try {
-          const draft = await draftRunner({
-            config,
-            project: body.project,
-            repo: body.repo,
-            notes: body.notes,
-            existing: body.existing,
-            platform: body.platform, // raw: generation resolves it (explicit or from configured backends)
-          });
+          const draft = body.kind === "stack"
+            ? await stackDraftRunner({
+                config,
+                name: body.name,
+                notes: body.notes,
+                existing: body.existing,
+              })
+            : await draftRunner({
+                config,
+                project: body.project,
+                repo: body.repo,
+                notes: body.notes,
+                existing: body.existing,
+                platform: body.platform, // raw: generation resolves it (explicit or from configured backends)
+              });
           return sendJson(res, 200, draft);
         } catch (err) {
           return sendContextError(res, err);
