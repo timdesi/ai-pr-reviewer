@@ -50,13 +50,13 @@ test("extractContextMarkdown undresses a stray fence but keeps plain text", () =
 
 test("buildContextGenMessage includes identity, notes, existing, AGENTS.md", () => {
   const msg = buildContextGenMessage({
-    project: "PROCON",
-    repo: "ppc-main",
+    project: "ACME",
+    repo: "acme-app",
     notes: "don't flag the BEN reuse",
     existing: "# old",
     agentsMd: "## AGENTS",
   });
-  assert.match(msg, /PROCON\/ppc-main/);
+  assert.match(msg, /ACME\/acme-app/);
   assert.match(msg, /don't flag the BEN reuse/);
   assert.match(msg, /# old/);
   assert.match(msg, /## AGENTS/);

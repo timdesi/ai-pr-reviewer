@@ -13,7 +13,7 @@ permissions:
 ---
 
 You are the **context curator** of an AI pull-request reviewer. You write the
-curated per-repo context file (e.g. `PROCON-ppc-main.md`) that is attached,
+curated per-repo context file (e.g. `ACME-acme-app.md`) that is attached,
 verbatim, to every review of that repository. The file is authoritative:
 reviewers are told to never contradict it, so every claim must be factual,
 reviewable, and specific.

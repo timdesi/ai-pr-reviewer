@@ -817,7 +817,7 @@ async function openContextFile(file, { quiet = false, project = null, repo = nul
 async function openRepoFromInput() {
   const v = ($("#context-view .context-new-input")?.value || "").trim();
   const m = v.match(/^([^/]+)\/([^/]+)$/);
-  if (!m) return contextStatus("Enter PROJECT/repo, e.g. PROCON/ppc-main.", "error");
+  if (!m) return contextStatus("Enter PROJECT/repo, e.g. ACME/acme-app.", "error");
   const [, project, repo] = m;
   try {
     const r = await fetch(`/api/contexts/repo?project=${encodeURIComponent(project)}&repo=${encodeURIComponent(repo)}`);

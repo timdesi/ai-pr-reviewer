@@ -33,71 +33,72 @@ function seed(dir, files) {
 
 test("safeContextFile: accepts only .md inside the contexts dir", () => {
   const dir = tmpDir();
-  assert.equal(safeContextFile(dir, "PROCON.md"), path.join(dir, "PROCON.md"));
-  assert.equal(safeContextFile(dir, "PROCON-ppc-main.md"), path.join(dir, "PROCON-ppc-main.md"));
+  assert.equal(safeContextFile(dir, "ACME.md"), path.join(dir, "ACME.md"));
+  assert.equal(safeContextFile(dir, "ACME-acme-app.md"), path.join(dir, "ACME-acme-app.md"));
   assert.equal(safeContextFile(dir, "stacks/java-spring.md"), path.join(dir, "stacks/java-spring.md"));
   // rejections
   for (const bad of [
-    "../PROCON.md",
-    "stacks/../PROCON.md",
-    "/abs/PROCON.md",
+    "../ACME.md",
+    "stacks/../ACME.md",
+    "/abs/ACME.md",
     "a/b.md", // unknown subdir
-    "PROCON.txt",
+    "ACME.txt",
     ".hidden.md",
-    "PROCON",
+    "ACME",
     "",
     "stacks/..",
-    "PROCON.md\0",
+    "ACME.md\0",
   ]) {
     assert.equal(safeContextFile(dir, bad), null, `expected ${JSON.stringify(bad)} to be rejected`);
   }
 });
 
 test("validName / validProjectRepo: strict slug shapes", () => {
-  assert.equal(validName("PROCON"), true);
-  assert.equal(validName("ppc-main"), true);
+  assert.equal(validName("ACME"), true);
+  assert.equal(validName("acme-app"), true);
   assert.equal(validName("repo_2"), true);
   assert.equal(validName("bad/name"), false);
   assert.equal(validName("has space"), false);
   assert.equal(validName(""), false);
   assert.equal(validName(null), false);
-  assert.equal(validProjectRepo("PROCON", "ppc-main"), true);
-  assert.equal(validProjectRepo("PROCON", "../ppc-main"), false);
+  assert.equal(validProjectRepo("ACME", "acme-app"), true);
+  assert.equal(validProjectRepo("ACME", "../acme-app"), false);
 });
 
 test("readContextDoc: raw text, and exists=false for a missing file", () => {
   const dir = tmpDir();
-  writeFileSync(path.join(dir, "PROCON.md"), "# header\n\nbody\n", "utf8");
-  const got = readContextDoc(dir, "PROCON.md");
+  writeFileSync(path.join(dir, "ACME.md"), "# header\n\nbody\n", "utf8");
+  const got = readContextDoc(dir, "ACME.md");
   assert.equal(got.exists, true);
   assert.equal(got.text, "# header\n\nbody\n");
-  const missing = readContextDoc(dir, "PROCON-nope.md");
+  const missing = readContextDoc(dir, "ACME-nope.md");
   assert.equal(missing.exists, false);
   assert.equal(missing.text, "");
-  assert.equal(missing.file, "PROCON-nope.md");
-  assert.throws(() => readContextDoc(dir, "../PROCON.md"), (e) => e instanceof ContextEditorError && e.status === 400);
+  assert.equal(missing.file, "ACME-nope.md");
+  assert.throws(() => readContextDoc(dir, "../ACME.md"), (e) => e instanceof ContextEditorError && e.status === 400);
 });
 
 test("resolveRepoContextFile: <PROJECT>-<repo>.md wins, <repo>.md fallback, create-target on miss", () => {
   const dir = tmpDir();
-  seed(dir, { "ppc-main.md": "# fallback" });
-  assert.equal(resolveRepoContextFile(dir, "PROCON", "ppc-main"), "ppc-main.md");
-  seed(dir, { "PROCON-ppc-main.md": "# specific" });
-  assert.equal(resolveRepoContextFile(dir, "PROCON", "ppc-main"), "PROCON-ppc-main.md");
+  seed(dir, { "acme-app.md": "# fallback" });
+  assert.equal(resolveRepoContextFile(dir, "ACME", "acme-app"), "acme-app.md");
+  seed(dir, { "ACME-acme-app.md": "# specific" });
+  assert.equal(resolveRepoContextFile(dir, "ACME", "acme-app"), "ACME-acme-app.md");
   assert.equal(resolveRepoContextFile(dir, "ACME", "widgets"), "ACME-widgets.md");
   assert.equal(resolveRepoContextFile(dir, "bad/name", "x"), null);
 });
 
 test("getRepoContext: reads per-repo context with fallback handling", () => {
   const dir = tmpDir();
-  seed(dir, { "PROCON-ppc-main.md": "# specific\n" });
-  const specific = getRepoContext(dir, "PROCON", "ppc-main");
-  assert.deepEqual({ file: specific.file, exists: specific.exists }, { file: "PROCON-ppc-main.md", exists: true });
+  seed(dir, { "ACME-acme-app.md": "# specific\n" });
+  const specific = getRepoContext(dir, "ACME", "acme-app");
+  assert.deepEqual({ file: specific.file, exists: specific.exists }, { file: "ACME-acme-app.md", exists: true });
   assert.equal(specific.text, "# specific\n");
-  // fallback
-  seed(dir, { "ppc-main.md": "# fallback\n" });
-  const fb = getRepoContext(dir, "ACME", "ppc-main");
-  assert.deepEqual({ file: fb.file, exists: fb.exists }, { file: "ppc-main.md", exists: true });
+  // fallback: a different project whose <repo>.md fallback exists and whose
+  // <PROJECT>-<repo>.md does NOT (the specific file above is for ACME only)
+  seed(dir, { "acme-app.md": "# fallback\n" });
+  const fb = getRepoContext(dir, "GAIA", "acme-app");
+  assert.deepEqual({ file: fb.file, exists: fb.exists }, { file: "acme-app.md", exists: true });
   assert.equal(fb.text, "# fallback\n");
   // missing → create-target name, exists=false
   const missing = getRepoContext(dir, "ACME", "widgets");
@@ -108,12 +109,12 @@ test("getRepoContext: reads per-repo context with fallback handling", () => {
 
 test("writeContextDoc: atomic create/overwrite, creates stacks/ on demand", () => {
   const dir = tmpDir();
-  const r = writeContextDoc(dir, { file: "PROCON-ppc-main.md", text: "# v1\n" });
-  assert.deepEqual(r, { ok: true, file: "PROCON-ppc-main.md" });
-  assert.equal(readFileSync(path.join(dir, "PROCON-ppc-main.md"), "utf8"), "# v1\n");
+  const r = writeContextDoc(dir, { file: "ACME-acme-app.md", text: "# v1\n" });
+  assert.deepEqual(r, { ok: true, file: "ACME-acme-app.md" });
+  assert.equal(readFileSync(path.join(dir, "ACME-acme-app.md"), "utf8"), "# v1\n");
   // overwrite
-  writeContextDoc(dir, { file: "PROCON-ppc-main.md", text: "# v2\n" });
-  assert.equal(readFileSync(path.join(dir, "PROCON-ppc-main.md"), "utf8"), "# v2\n");
+  writeContextDoc(dir, { file: "ACME-acme-app.md", text: "# v2\n" });
+  assert.equal(readFileSync(path.join(dir, "ACME-acme-app.md"), "utf8"), "# v2\n");
   // nested stacks dir is created
   writeContextDoc(dir, { file: "stacks/java-spring.md", text: "---\nmatch: [\"*/.java\"]\n---\n" });
   assert.equal(readFileSync(path.join(dir, "stacks/java-spring.md"), "utf8"), "---\nmatch: [\"*/.java\"]\n---\n");
@@ -126,10 +127,10 @@ test("writeContextDoc: atomic create/overwrite, creates stacks/ on demand", () =
 
 test("writeRepoContext: resolve-or-create keeps the fallback file when present", () => {
   const dir = tmpDir();
-  seed(dir, { "ppc-main.md": "# old\n" });
-  writeRepoContext(dir, { project: "PROCON", repo: "ppc-main", text: "# updated\n" });
-  assert.equal(readFileSync(path.join(dir, "ppc-main.md"), "utf8"), "# updated\n", "updates the existing fallback file");
-  assert.equal(existsSync(path.join(dir, "PROCON-ppc-main.md")), false, "no duplicate created");
+  seed(dir, { "acme-app.md": "# old\n" });
+  writeRepoContext(dir, { project: "ACME", repo: "acme-app", text: "# updated\n" });
+  assert.equal(readFileSync(path.join(dir, "acme-app.md"), "utf8"), "# updated\n", "updates the existing fallback file");
+  assert.equal(existsSync(path.join(dir, "ACME-acme-app.md")), false, "no duplicate created");
   // absent → creates <PROJECT>-<repo>.md
   writeRepoContext(dir, { project: "ACME", repo: "widgets", text: "# new\n" });
   assert.equal(readFileSync(path.join(dir, "ACME-widgets.md"), "utf8"), "# new\n");
@@ -139,38 +140,38 @@ test("writeRepoContext: resolve-or-create keeps the fallback file when present",
 test("writeContextDoc: caps oversized files (413)", () => {
   const dir = tmpDir();
   const big = "x".repeat(600 * 1024);
-  assert.throws(() => writeContextDoc(dir, { file: "PROCON.md", text: big }), (e) => e instanceof ContextEditorError && e.status === 413);
+  assert.throws(() => writeContextDoc(dir, { file: "ACME.md", text: big }), (e) => e instanceof ContextEditorError && e.status === 413);
 });
 
 test("deleteContextDoc: removes the file, 404 when missing, 400 on unsafe name", () => {
   const dir = tmpDir();
-  writeFileSync(path.join(dir, "PROCON.md"), "x", "utf8");
-  assert.deepEqual(deleteContextDoc(dir, "PROCON.md"), { ok: true, file: "PROCON.md" });
-  assert.equal(existsSync(path.join(dir, "PROCON.md")), false);
-  assert.throws(() => deleteContextDoc(dir, "PROCON.md"), (e) => e instanceof ContextEditorError && e.status === 404);
-  assert.throws(() => deleteContextDoc(dir, "../PROCON.md"), (e) => e instanceof ContextEditorError && e.status === 400);
+  writeFileSync(path.join(dir, "ACME.md"), "x", "utf8");
+  assert.deepEqual(deleteContextDoc(dir, "ACME.md"), { ok: true, file: "ACME.md" });
+  assert.equal(existsSync(path.join(dir, "ACME.md")), false);
+  assert.throws(() => deleteContextDoc(dir, "ACME.md"), (e) => e instanceof ContextEditorError && e.status === 404);
+  assert.throws(() => deleteContextDoc(dir, "../ACME.md"), (e) => e instanceof ContextEditorError && e.status === 400);
 });
 
 test("listContextDocs: classifies project-wide, per-repo and stacks", () => {
   const dir = tmpDir();
   seed(dir, {
-    "PROCON.md": "# project\n",
-    "PROCON-ppc-main.md": "# repo\n",
-    "PROCON-procon-api-performance-tests.md": "# repo2\n",
-    "ppc-main.md": "# fallback-only repo\n",
+    "ACME.md": "# project\n",
+    "ACME-acme-app.md": "# repo\n",
+    "ACME-acme-api-performance-tests.md": "# repo2\n",
+    "acme-app.md": "# fallback-only repo\n",
     "stacks/java-spring.md": "---\nmatch: [\"**/*.java\"]\n---\n# java\n",
     "stacks/angular.md": "# no front matter yet\n",
   });
   const l = listContextDocs(dir);
   assert.equal(l.dir, dir);
   const byName = Object.fromEntries(l.top.map((t) => [t.name, t]));
-  assert.equal(byName["PROCON"].kind, "project");
-  assert.equal(byName["PROCON"].project, "PROCON");
-  assert.deepEqual(byName["PROCON-ppc-main"].kind, "repo");
-  assert.deepEqual(byName["PROCON-ppc-main"].project, "PROCON");
-  assert.deepEqual(byName["PROCON-ppc-main"].repo, "ppc-main");
-  assert.deepEqual(byName["PROCON-procon-api-performance-tests"].repo, "procon-api-performance-tests");
-  assert.equal(byName["ppc-main"].kind, "file", "fallback-only repo file stays generic");
+  assert.equal(byName["ACME"].kind, "project");
+  assert.equal(byName["ACME"].project, "ACME");
+  assert.deepEqual(byName["ACME-acme-app"].kind, "repo");
+  assert.deepEqual(byName["ACME-acme-app"].project, "ACME");
+  assert.deepEqual(byName["ACME-acme-app"].repo, "acme-app");
+  assert.deepEqual(byName["ACME-acme-api-performance-tests"].repo, "acme-api-performance-tests");
+  assert.equal(byName["acme-app"].kind, "file", "fallback-only repo file stays generic");
   assert.deepEqual(
     l.stacks.map((s) => [s.name, s.match]),
     [
@@ -198,8 +199,8 @@ function tmpEnvFile() {
 test("server /api/contexts*: list, read, create, update, delete with strict validation", async () => {
   const dir = tmpDir();
   seed(dir, {
-    "PROCON.md": "# project\n",
-    "PROCON-ppc-main.md": "# existing\n",
+    "ACME.md": "# project\n",
+    "ACME-acme-app.md": "# existing\n",
   });
   const { createServer } = await import("../src/server.js");
   let server = null;
@@ -222,12 +223,12 @@ test("server /api/contexts*: list, read, create, update, delete with strict vali
     const list = await (await fetch(`${base}/api/contexts`)).json();
     assert.equal(list.dir, dir);
     assert.deepEqual(list.top.map((t) => [t.name, t.kind]), [
-      ["PROCON-ppc-main", "repo"],
-      ["PROCON", "project"],
+      ["ACME-acme-app", "repo"],
+      ["ACME", "project"],
     ]);
 
     // read a doc
-    const got = await (await fetch(`${base}/api/contexts/doc?file=${encodeURIComponent("PROCON.md")}`)).json();
+    const got = await (await fetch(`${base}/api/contexts/doc?file=${encodeURIComponent("ACME.md")}`)).json();
     assert.equal(got.exists, true);
     assert.equal(got.text, "# project\n");
 
@@ -252,10 +253,10 @@ test("server /api/contexts*: list, read, create, update, delete with strict vali
     const upd = await fetch(`${base}/api/contexts/doc`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: "PROCON-ppc-main.md", text: "# updated\n" }),
+      body: JSON.stringify({ file: "ACME-acme-app.md", text: "# updated\n" }),
     });
     assert.equal(upd.status, 200);
-    assert.equal(readFileSync(path.join(dir, "PROCON-ppc-main.md"), "utf8"), "# updated\n");
+    assert.equal(readFileSync(path.join(dir, "ACME-acme-app.md"), "utf8"), "# updated\n");
 
     // invalid project/repo → 400
     const bad = await fetch(`${base}/api/contexts/repo`, {

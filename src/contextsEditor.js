@@ -164,7 +164,7 @@ export function deleteContextDoc(dir, file) {
  * Enumerate every curated context file under `dir`, classified for the UI:
  *   - `stacks`: `<name>` + parsed `match:` patterns (null when absent/broken)
  *   - `top`: each other `.md` file with a `kind` — `"project"` when its name
- *     prefixes other files (`PROCON.md` + `PROCON-<repo>.md`), `"repo"` when
+ *     prefixes other files (`ACME.md` + `ACME-<repo>.md`), `"repo"` when
  *     it is `<PROJECT>-<repo>.md` under such a project, else `"file"`.
  * A missing/unreadable dir yields an empty listing (never an error), matching
  * the project's non-fatal, best-effort convention.
