@@ -417,7 +417,6 @@ aside[hidden] { display: none; }
 /* --- curated-context editor ------------------------------------------------- */
 #context-nav { flex: none; }
 #context-nav.active { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
-#context-view { max-width: 1100px; }
 .context-layout { display: flex; gap: 16px; align-items: flex-start; }
 .context-list { width: 340px; min-width: 300px; flex: none; max-height: calc(100vh - 220px); overflow-y: auto; }
 .context-list h4 { margin: 14px 0 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
