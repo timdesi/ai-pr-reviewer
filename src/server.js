@@ -7,6 +7,17 @@
 //   GET  /api/jobs                list past/active jobs
 //   GET  /api/jobs/:name          job detail (status.json)
 //   GET  /api/jobs/:name/artifacts  all artifact files (bounded content)
+//   GET  /api/contexts                 list curated context files (per-repo,
+//                                      project-wide, stacks) under dirs.contexts
+//   GET  /api/contexts/doc?file=…      read a context file (raw text)
+//   PUT  /api/contexts/doc             {file, text} create/overwrite a file
+//   DELETE /api/contexts/doc?file=…    delete a context file
+//   GET  /api/contexts/repo?project=&repo=  resolve+read per-repo context
+//   PUT  /api/contexts/repo            {project, repo, text} create/update it
+//   POST /api/contexts/generate        {project, repo, notes, existing?,
+//                                       platform?} AI-draft the context file
+//                                       (returns a reviewable draft, never
+//                                       writes to disk)
 //   GET  /api/events              Server-Sent Events stream (live run updates)
 //   GET  /api/pulls?live=1        per-PR view: grouped reviews + live head/new
 //                                 commits since the last review (src/pulls.js)
@@ -49,6 +60,16 @@ import { BitbucketClient } from "./bitbucket.js";
 import { createReviewClient, botUsernamesOf, shouldPublish, prCommentUrl, liveClients } from "./clients.js";
 import { defaultPriceCandidates, listAvailableModels } from "./costs.js";
 import { writeModelAssignments } from "./models.js";
+import {
+  listContextDocs,
+  readContextDoc,
+  getRepoContext,
+  writeContextDoc,
+  writeRepoContext,
+  deleteContextDoc,
+  ContextEditorError,
+} from "./contextsEditor.js";
+import { generateContextDraft } from "./contextGen.js";
 import { log } from "./log.js";
 
 const UI_DIR = path.join(import.meta.dirname, "..", "ui");
@@ -227,7 +248,7 @@ async function replyTeachForce(config, ref, triggerCommentId, previous) {
   }
 }
 
-export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview } = {}) {
+export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview, generateDraft: draftRunner = generateContextDraft } = {}) {
   assertAnyBackendConfig(config);
   const clients = new Set();
   // One review runs at a time; extra requests (webhook or UI) wait in the queue.
@@ -355,6 +376,13 @@ export function createServer({ config, port = config.server.port, host = config.
     const body = JSON.stringify(obj);
     res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
     res.end(body);
+  };
+
+  // Context-editor errors carry their HTTP status (ContextEditorError); any
+  // other failure is a 500 so the client gets a real message, not a hang.
+  const sendContextError = (res, err) => {
+    const status = err instanceof ContextEditorError && Number.isInteger(err.status) ? err.status : 500;
+    return sendJson(res, status, { error: err.message });
   };
 
   const readBody = (req) =>
@@ -640,6 +668,85 @@ export function createServer({ config, port = config.server.port, host = config.
       // --- management statistics (offline, computed from the jobs dir) -------
       if (url === "/api/stats") {
         return sendJson(res, 200, computeStats(config));
+      }
+
+      // --- curated-context editor -------------------------------------------
+      // Read/edit the context files that every review consumes (per-repo
+      // `<PROJECT>-<repo>.md`, project-wide `<PROJECT>.md`, stacks/*.md) —
+      // the files loadProjectContext() reads from config.dirs.contexts
+      // (REVIEW_CONTEXT_DIR). Saves are direct + atomic; paths are validated
+      // strictly server-side (src/contextsEditor.js) so the editor can never
+      // touch a file outside the contexts dir.
+      const contextsDir = config.dirs.contexts;
+      const qp = () => new URL(req.url, "http://localhost").searchParams;
+
+      if (url === "/api/contexts" && method === "GET") {
+        return sendJson(res, 200, listContextDocs(contextsDir));
+      }
+      if (url === "/api/contexts/doc" && method === "GET") {
+        try {
+          return sendJson(res, 200, readContextDoc(contextsDir, qp().get("file")));
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      if (url === "/api/contexts/doc" && method === "PUT") {
+        const body = await readBody(req);
+        try {
+          return sendJson(res, 200, writeContextDoc(contextsDir, { file: body.file, text: body.text }));
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      if (url === "/api/contexts/doc" && method === "DELETE") {
+        try {
+          return sendJson(res, 200, deleteContextDoc(contextsDir, qp().get("file")));
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      if (url === "/api/contexts/repo" && method === "GET") {
+        try {
+          return sendJson(
+            res,
+            200,
+            getRepoContext(contextsDir, qp().get("project"), qp().get("repo")),
+          );
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      if (url === "/api/contexts/repo" && method === "PUT") {
+        const body = await readBody(req);
+        try {
+          return sendJson(
+            res,
+            200,
+            writeRepoContext(contextsDir, { project: body.project, repo: body.repo, text: body.text }),
+          );
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      // AI-assisted drafting (the "Generate with AI" action in the Context
+      // page): run the `context-gen` agent with repo identity + developer
+      // notes (+ optional existing text) and return a DRAFT — never saved,
+      // the browser shows it in the editor for a human to review and Save.
+      if (url === "/api/contexts/generate" && method === "POST") {
+        const body = await readBody(req);
+        try {
+          const draft = await draftRunner({
+            config,
+            project: body.project,
+            repo: body.repo,
+            notes: body.notes,
+            existing: body.existing,
+            platform: body.platform, // raw: generation resolves it (explicit or from configured backends)
+          });
+          return sendJson(res, 200, draft);
+        } catch (err) {
+          return sendContextError(res, err);
+        }
       }
 
       const jobName = jobNameFromPath(url);

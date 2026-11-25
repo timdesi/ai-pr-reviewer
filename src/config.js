@@ -238,6 +238,16 @@ export function loadConfig({ envFile } = {}) {
       // onto the PVC. Default: next to the jobs dir as a dot-file.
       settingsFile: null,
     },
+    contextGen: {
+      // Model that drafts/refines curated context files from the dashboard's
+      // "Context" page (the `context-gen` agent). The draft lands in the editor
+      // as a reviewable revision — never written to disk automatically, because
+      // curated context is authoritative to reviewers. Unset/empty falls back to
+      // the consensus model, then reviewer A; with none configured the
+      // "Generate with AI" action is disabled.
+      model: str("CONTEXT_GEN_MODEL"),
+      timeoutSeconds: int("CONTEXT_GEN_TIMEOUT_SECONDS", 300),
+    },
     opencode: {
       bin: str("OPENCODE_BIN", "opencode"),
       maxRetries: int("AGENT_MAX_RETRIES", 2),

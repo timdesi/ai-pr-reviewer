@@ -9,8 +9,53 @@ Newest entries come first, so the older `v1.x` image tags appear further down,
 below the `v0.2.x` entries.
 
 ---
+ 
+## Unreleased
 
-## Unreleased — Vision transcription reliability & observability
+### Curated-context editor (dashboard)
+
+- **The team can now edit review context from the dashboard.** A new **🧠
+  Context** page lists every curated context file under `REVIEW_CONTEXT_DIR`
+  (`<PROJECT>-<repo>.md` per-repo with the `<repo>.md` fallback, project-wide
+  `<PROJECT>.md`, and `stacks/*.md`) and lets you open any of them for
+  editing, create a fresh per-repo context (`PROJECT/repo`, suggested from
+  repos seen in reviews) and delete one (with confirmation). Saves write
+  straight to the contexts dir and apply to the **next** review of that repo
+  — no restart, no redeploy, no container rebuild.
+- **Safe by construction.** File names are validated strictly server-side
+  (`src/contextsEditor.js`): only `.md` under the contexts dir itself or
+  `stacks/`, no `..`/absolute paths, so the API can never touch a file outside
+  `REVIEW_CONTEXT_DIR`. Writes are atomic (temp file + rename) so a crash
+  mid-save can't leave a truncated context file that a concurrent review might
+  read, and there is a 512 KB per-file cap.
+- **Non-fatal, best-effort.** A missing/unreadable contexts dir yields an empty
+  listing; a broken stack front matter is listed without its `match` — nothing
+  the editor does can turn a review into a hard failure, matching the project's
+  optional-helpers convention. New API: `GET/PUT/DELETE /api/contexts/…`.
+- **Review-driven hardening.** Per the Copilot review on the feature PR: the
+  containment check is now canonical (`realpathSync`), so a symlinked context
+  file or `stacks/` dir pointing outside `REVIEW_CONTEXT_DIR` is rejected
+  instead of followed; repo slugs containing `.` (`service.api`, `.github`)
+  are accepted, listed and classified (they were already reviewed); a lone
+  per-repo file no longer needs its project-wide file to be recognized as such;
+  `GET /api/contexts/repo` argument bug fixed (the dashboards "Open / new"
+  flow 400'd on every request); AI drafting forwards the repo's platform;
+  stale generation/save responses can no longer clobber a different file's
+  editor or drop edits typed mid-save; Stats↔Context toggling no longer loses
+  the previous PR/Jobs view.
+- **“✨ AI draft” writes the file for you.** For any per-repo context, developers
+  paste **false positives or what the bot should know** and the new `context-gen`
+  opencode agent ([`prompts/context-gen-base.md`](prompts/context-gen-base.md),
+  copied verbatim by `build:agents` like `pr-vision`) drafts the whole
+  `PROJECT-repo.md` file — grounded on the repo’s own `AGENTS.md` (default
+  branch) when readable. The result lands in the editor as a **reviewable
+  draft**: nothing is ever written to disk automatically, because curated
+  context is authoritative to reviewers. Run via `POST /api/contexts/generate`
+  (`src/contextGen.js`); the drafting model is `CONTEXT_GEN_MODEL`, falling back
+  to the consensus model then reviewer A, and no model configured disables the
+  button.
+
+### Vision transcription reliability & observability
 
 - **Fixes an intermittent "all screenshots unreadable" failure.** The vision
   transcription ran `opencode run --agent pr-vision` with the image in a bare

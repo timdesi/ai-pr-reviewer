@@ -396,6 +396,57 @@ aside[hidden] { display: none; }
 #stats-view { max-width: 1000px; }
 .stats-hint { font-size: 12px; }
 
+/* --- curated-context editor ------------------------------------------------- */
+#context-nav { flex: none; }
+#context-nav.active { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+#context-view { max-width: 1100px; }
+.context-layout { display: flex; gap: 16px; align-items: flex-start; }
+.context-list { width: 320px; min-width: 280px; flex: none; }
+.context-list h4 { margin: 14px 0 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+.context-list h4:first-of-type { margin-top: 2px; }
+.context-files { list-style: none; margin: 0 0 4px; padding: 0; }
+.context-files li { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+button.context-file {
+  flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono); font-size: 12px; padding: 5px 10px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--bg);
+  color: var(--text);
+}
+button.context-file:hover { border-color: var(--accent); }
+.context-match { font-size: 10px; color: var(--dim); flex: none; }
+.context-new { border-top: 1px dashed var(--border); margin-top: 14px; padding-top: 10px; }
+.context-new-row { display: flex; gap: 8px; }
+.context-new-input {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+  font-family: var(--mono); font-size: 13px;
+}
+.context-new-input:focus { outline: none; border-color: var(--accent); }
+.context-editor { flex: 1; min-width: 0; }
+.context-editor textarea.artifact { min-height: 560px; white-space: pre; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+button.danger { color: var(--red); border-color: var(--red); background: #380d13; }
+button.danger:hover { background: #4c121b; }
+button.ai { color: var(--magenta); border-color: var(--magenta); background: #2b1038; }
+button.ai:hover { background: #3b1449; }
+#context-view .toolbar .badge { flex: none; }
+#context-view .notice { margin-top: 0; }
+
+/* AI draft panel (notes box that turns into a drafted context file). */
+.context-gen {
+  border: 1px dashed var(--magenta); border-radius: 10px; padding: 10px 12px;
+  background: rgba(232, 121, 249, 0.05); margin-bottom: 10px;
+}
+.context-gen-title { font-size: 12px; color: var(--magenta); font-weight: 600; margin-bottom: 8px; }
+textarea.context-gen-notes {
+  width: 100%; min-height: 96px; background: #0b0f19; color: #c8d3ea;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-family: var(--mono); font-size: 12px; resize: vertical;
+}
+.context-gen-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.context-gen-status { font-size: 12px; }
+
+
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .kpi {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;

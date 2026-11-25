@@ -19,6 +19,7 @@
       <button id="start-btn" type="submit">▶ Review</button>
     </form>
     <div class="header-actions">
+      <button id="context-nav" type="button" title="Edit per-repo / project / stack review context">🧠 Context</button>
       <button id="stats-nav" type="button" title="Management statistics">📊 Stats</button>
       <div id="model-settings">
       <button id="models-toggle" type="button">Models ▾</button>
@@ -79,8 +80,11 @@
         <div id="tab-content"></div>
       </div>
       <div id="stats-view" hidden></div>
+      <div id="context-view" hidden></div>
     </section>
   </main>
+
+  <datalist id="repo-suggestions"></datalist>
 
   <div id="modal" hidden>
     <div class="modal-box">

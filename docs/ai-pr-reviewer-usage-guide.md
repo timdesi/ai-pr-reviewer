@@ -198,6 +198,36 @@ comment with the same stale-SHA check as the CLI) and a **New review** form.
 Costs and model assignments are shown per run. CLI and UI runs share the job
 store, so you can start a run in a terminal and watch it in the browser.
 
+### 4.1 The context editor
+
+The **🧠 Context** button opens the curated-context editor — the place where a
+team tunes what the reviewers "know" about a repository:
+
+- **Per-repo context** (`PROJECT-repo.md` in `REVIEW_CONTEXT_DIR`, fallback
+  `repo.md`) is attached verbatim to every review of that repo. Type
+  `PROJECT/repo` (suggestions come from repos the dashboard has seen) to open
+  the existing file or start a new one; **Save** creates it.
+- **✨ AI draft** fills the file for you: open (or create) the per-repo context,
+  press the button and **paste false positives or anything the bot should
+  know** — the dedicated `context-gen` agent writes the whole file from your
+  notes, grounded on the repo's own `AGENTS.md` when readable. The draft lands
+  in the editor for you to review, then **Save**; nothing is written to disk
+  automatically (curated context is authoritative to reviewers, so a human
+  always reviews the draft). Needs a drafting model: `CONTEXT_GEN_MODEL` (or
+  falls back to `CONSENSUS_MODEL` → `REVIEWER_MODEL_A`); with none set, the
+  button is hidden.
+- **Project-wide** (`PROJECT.md`) and **stack rules** (`stacks/*.md`) are
+  listed and editable the same way — keep a stack's leading
+  `--- match: [...] ---` front matter intact.
+- **Delete** asks for confirmation. Saves and deletes go straight to
+  `REVIEW_CONTEXT_DIR` on the pod and apply to the **next** review of that repo
+  (no restart, no redeploy). Edits are not version-controlled.
+
+Everything the editor shows is exactly what the reviewers receive before
+`src/context.js` strips HTML comments; see [Tuning the reviewer per
+repository](#7-tuning-the-reviewer-per-repository-no-code-change) for what to
+put in a repo file.
+
 ---
 
 ## 5. The CLI (local usage)

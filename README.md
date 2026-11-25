@@ -51,7 +51,7 @@ merge, decline, or code change.
 | Screenshot reading | Images pasted into the PR are transcribed by a vision model, so UI changes get reviewed too |
 | Smart re-reviews | Findings already explained in the PR discussion are marked resolved instead of re-raised |
 | Real checkout | Reviewers run against the actual commit plus your curated project context and the repo's own `AGENTS.md` — not just a diff |
-| Dashboard | Live per-agent progress, cost per review, history grouped by pull request, and a model switcher |
+| Dashboard | Live per-agent progress, cost per review, history grouped by pull request, a model switcher, and a curated-context editor |
 | Two platforms | Bitbucket Data Center and GitHub are independent backends on the same server; each PR picks its own |
 
 ## Example review
@@ -165,6 +165,7 @@ The ones you'll touch first:
 | `REVIEWER_MODEL_A/B/C/D` · `CONSENSUS_MODEL` · `VISION_MODEL` | Which model plays which role |
 | `COMMENT_MIN_SEVERITY` · `COMMENT_MIN_CONFIDENCE` | Gate for what appears in the public comment |
 | `REVIEW_CONTEXT_DIR` · `FETCH_REPO_CONTEXT` | Per-repo curated context and `AGENTS.md` |
+| `CONTEXT_GEN_MODEL` | Model that drafts context files from the dashboard (falls back to consensus) |
 | `REVIEWER_PARALLELISM` | `0` = all reviewers in parallel, `1` = one at a time (small hosts) |
 
 > A Bitbucket-only or GitHub-only instance simply fills in one block and leaves
@@ -195,6 +196,31 @@ timeout limits), never provider or token values.
   `image` in the OpenCode config).
 - The consensus model reads roughly 60 KB of reviewer reports, so pick one that
   handles long context well.
+
+### Curated context
+
+Every review is fed curated context from `REVIEW_CONTEXT_DIR` — the per-repo
+files, project-wide file and stack rules in [src/context.js](src/context.js).
+The team maintains these files **from the dashboard**: the **🧠 Context** page
+lists everything on disk, opens any file for editing, lets you create a new
+`PROJECT/repo` context (started from `PROJECT-repo.md` on save), and deletes
+one (with confirmation). Saves go straight to `REVIEW_CONTEXT_DIR` and apply to
+the **next** review of that repo — no restart or redeploy. The server validates
+file names strictly (only `.md` under `REVIEW_CONTEXT_DIR`/`stacks`, no path
+traversal) and writes atomically, so a crash mid-save can't leave a truncated
+file behind. Like the rest of the dashboard this is local to the pod: edits
+land on that host's disk and are not version-controlled.
+
+**✨ AI draft** does the heavy lifting when a repo has no context yet, or when
+the team wants the bot to learn something. Paste **false positives and notes**
+("don't flag the BEN field reuse", "this repo is the backend only") and the
+dedicated `context-gen` agent ([prompts/context-gen-base.md](prompts/context-gen-base.md))
+writes the whole file from them — grounded on the repo's own `AGENTS.md` when
+readable. The result appears in the editor as a **reviewable draft** and is only
+written to disk when you press **Save**, because curated context is
+authoritative to reviewers. The drafting model is `CONTEXT_GEN_MODEL` (falling
+back to the consensus model, then reviewer A); with none configured the button
+is hidden.
 
 ## How it works
 

@@ -241,10 +241,11 @@ function renderJobList() {
 
 function switchMode(mode) {
   state.mode = mode;
-  const isStats = mode === "stats";
-  // While stats is open the sidebar keeps showing the list that was active
-  // before (prevMode), so users keep their context and can still navigate.
-  const listMode = isStats ? state.prevMode || "pulls" : mode;
+  // Both Stats and Context are full-width pages; while one is open the sidebar
+  // keeps showing the list that was active before (prevMode), so users keep
+  // their context and can still navigate.
+  const fullscreen = mode === "stats" || mode === "context";
+  const listMode = fullscreen ? state.prevMode || "pulls" : mode;
   for (const b of document.querySelectorAll("#mode-toggle button")) {
     b.classList.toggle("active", b.dataset.mode === listMode);
   }
@@ -252,9 +253,15 @@ function switchMode(mode) {
   // and always stays reachable.
   const statsNav = $("#stats-nav");
   if (statsNav) {
-    statsNav.classList.toggle("active", isStats);
-    statsNav.textContent = isStats ? "← Close stats" : "📊 Stats";
-    statsNav.title = isStats ? "Close statistics and go back" : "Management statistics";
+    statsNav.classList.toggle("active", mode === "stats");
+    statsNav.textContent = mode === "stats" ? "← Close stats" : "📊 Stats";
+    statsNav.title = mode === "stats" ? "Close statistics and go back" : "Management statistics";
+  }
+  const contextNav = $("#context-nav");
+  if (contextNav) {
+    contextNav.classList.toggle("active", mode === "context");
+    contextNav.textContent = mode === "context" ? "← Close context" : "🧠 Context";
+    contextNav.title = mode === "context" ? "Close context editor and go back" : "Edit per-repo / project / stack review context";
   }
   // Left sidebar stays visible in every mode.
   $("#pulls-list").hidden = listMode !== "pulls";
@@ -265,13 +272,21 @@ function switchMode(mode) {
   if (listMode === "pulls") renderPulls();
   else if (listMode === "jobs") renderJobList();
 
-  if (isStats) {
+  if (mode === "stats") {
     $("#job-view").hidden = true;
     $("#empty-state").hidden = true;
+    $("#context-view").hidden = true;
     $("#stats-view").hidden = false;
     renderStats();
+  } else if (mode === "context") {
+    $("#job-view").hidden = true;
+    $("#empty-state").hidden = true;
+    $("#stats-view").hidden = true;
+    $("#context-view").hidden = false;
+    renderContextView();
   } else {
     $("#stats-view").hidden = true;
+    $("#context-view").hidden = true;
     if (state.selected) {
       $("#empty-state").hidden = true;
       $("#job-view").hidden = false;
@@ -638,6 +653,407 @@ function buildStatsView(view, s) {
   view.appendChild(charts);
 }
 
+// ---- curated-context editor --------------------------------------------------
+// "Context" page: inspect and edit the exact curated context files every review
+// consumes — per-repo `<PROJECT>-<repo>.md` (fallback `<repo>.md`), project-wide
+// `<PROJECT>.md`, and stack rules `stacks/*.md`. Backed by /api/contexts*; saves
+// hit REVIEW_CONTEXT_DIR directly and apply to the next review of that repo.
+// Deletes are confirmed; unsaved text is kept per file across views.
+
+let contextDocs = null; // last /api/contexts payload
+let contextCurrent = null; // { file, exists, fresh, project, repo } of the doc in the editor
+const contextDrafts = {}; // file -> unsaved textarea text
+const contextNotes = {}; // file -> developer notes for AI drafting (kept per file)
+let contextGenOpen = false; // is the AI-draft notes panel expanded?
+let contextGenRunning = false; // a generation call is in flight
+let contextGenFile = null; // which file the in-flight generation belongs to
+
+function contextStatus(msg, kind = "error") {
+  const n = el("div", `notice ${kind}`, msg);
+  $("#context-view").prepend(n);
+  setTimeout(() => n.remove(), 9000);
+}
+
+async function fetchContextDocs() {
+  try {
+    const r = await fetch("/api/contexts");
+    if (!r.ok) throw new Error(`/api/contexts HTTP ${r.status}`);
+    contextDocs = await r.json();
+  } catch (e) {
+    console.warn("fetch context docs failed", e);
+    contextDocs = { dir: "", stacks: [], top: [] };
+  }
+  return contextDocs;
+}
+
+// The "New per-repo" input suggests apps already seen in PR reviews plus every
+// per-repo context file already on disk (PROJ/repo form).
+function updateRepoSuggestions() {
+  const dl = $("#repo-suggestions");
+  if (!dl) return;
+  dl.innerHTML = "";
+  const seen = new Set();
+  const add = (v) => {
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    dl.appendChild(new Option(v));
+  };
+  for (const p of state.pulls) add(p.app);
+  for (const t of contextDocs?.top || []) {
+    if (t.kind === "repo" && t.project) add(`${t.project}/${t.repo}`);
+  }
+}
+
+// Starter body for a per-repo file that does not exist yet.
+function newRepoTemplate(file) {
+  const name = file.replace(/\.md$/, "");
+  return `# ${name} — curated review context
+
+<!-- Facts about this repository that reviewers should always respect: domain
+conventions, the repo's role, things NOT visible in a diff. HTML comments are
+stripped before the text reaches the reviewers. -->
+`;
+}
+
+function renderContextView() {
+  const view = $("#context-view");
+  const build = (docs) => {
+    view.innerHTML = "";
+    updateRepoSuggestions();
+
+    const toolbar = el("div", "toolbar");
+    const hint = el("span", "dim context-hint");
+    hint.textContent = docs.dir
+      ? `Edits are saved to ${docs.dir} and apply to the next review of that repo.`
+      : "No curated context directory is readable on this host.";
+    toolbar.appendChild(hint);
+    toolbar.appendChild(el("span", "spacer"));
+    const refresh = el("button", "", "⟳ Refresh");
+    refresh.onclick = () => fetchContextDocs().then(build);
+    toolbar.appendChild(refresh);
+    view.appendChild(toolbar);
+
+    const layout = el("div", "context-layout");
+    const list = el("div", "context-list card");
+    list.appendChild(el("h3", "", "Context files"));
+
+    const group = (title, items) => {
+      if (!items.length) return;
+      list.appendChild(el("h4", "", title));
+      const ul = el("ul", "context-files");
+      for (const it of items) {
+        const li = el("li");
+        const label = it.kind === "repo" ? `${it.project}/${it.repo}` : it.name;
+        const b = el("button", "context-file", label);
+        b.title = it.file;
+        b.onclick = () => openContextFile(it.file, { project: it.project, repo: it.repo });
+        li.appendChild(b);
+        if (it.kind === "stack" && (!it.match || !it.match.length)) {
+          li.appendChild(el("span", "dim context-match", "no match"));
+        }
+        ul.appendChild(li);
+      }
+      list.appendChild(ul);
+    };
+    group("Project-wide", docs.top.filter((t) => t.kind === "project"));
+    group("Per-repo", docs.top.filter((t) => t.kind === "repo"));
+    group("Other files", docs.top.filter((t) => t.kind === "file"));
+    group("Stacks", docs.stacks);
+
+    // Create-new per-repo form (PROJ/repo, with suggestions).
+    const mk = el("div", "context-new");
+    mk.appendChild(el("h4", "", "New per-repo context"));
+    mk.appendChild(
+      el(
+        "p",
+        "dim hint",
+        "Type PROJECT/repo (suggestions: repos seen in reviews). Opens the existing file, or starts a new <code>PROJECT-repo.md</code> to create on save.",
+      ),
+    );
+    const row = el("div", "context-new-row");
+    const input = el("input", "context-new-input");
+    input.type = "text";
+    input.placeholder = "PROJECT/repo";
+    input.setAttribute("list", "repo-suggestions");
+    input.spellcheck = false;
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        openRepoFromInput();
+      }
+    };
+    row.appendChild(input);
+    const go = el("button", "", "＋ Open / new");
+    go.onclick = () => openRepoFromInput();
+    row.appendChild(go);
+    mk.appendChild(row);
+    list.appendChild(mk);
+    layout.appendChild(list);
+
+    const editor = el("div", "context-editor");
+    editor.appendChild(
+      el("div", "empty", "Pick a context file on the left, or type PROJECT/repo above to open (or create) its context."),
+    );
+    layout.appendChild(editor);
+    view.appendChild(layout);
+
+    // Re-open the previously selected doc (kept across refreshes/mode switches).
+    if (contextCurrent) {
+      openContextFile(contextCurrent.file, {
+        quiet: true,
+        // Forward the repo identity so a per-repo file keeps its AI-draft
+        // action after a refresh or a Stats/Context round trip.
+        project: contextCurrent.project,
+        repo: contextCurrent.repo,
+      });
+    }
+  };
+  if (contextDocs) build(contextDocs);
+  else fetchContextDocs().then(build);
+}
+
+async function openContextFile(file, { quiet = false, project = null, repo = null } = {}) {
+  try {
+    const r = await fetch(`/api/contexts/doc?file=${encodeURIComponent(file)}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `/api/contexts/doc HTTP ${r.status}`);
+    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: false, project, repo });
+  } catch (e) {
+    if (!quiet) contextStatus(`Could not open ${file}: ${e.message}`, "error");
+  }
+}
+
+async function openRepoFromInput() {
+  const v = ($("#context-view .context-new-input")?.value || "").trim();
+  const m = v.match(/^([^/]+)\/([^/]+)$/);
+  if (!m) return contextStatus("Enter PROJECT/repo, e.g. ACME/acme-app.", "error");
+  const [, project, repo] = m;
+  try {
+    const r = await fetch(`/api/contexts/repo?project=${encodeURIComponent(project)}&repo=${encodeURIComponent(repo)}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `/api/contexts/repo HTTP ${r.status}`);
+    // exists=false → the editor shows a template; Save creates the file.
+    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: !j.exists, project, repo });
+  } catch (e) {
+    contextStatus(e.message, "error");
+  }
+}
+
+function setContextEditor({ file, exists, text, fresh, project = null, repo = null }) {
+  contextCurrent = { file, exists, fresh, project, repo };
+  contextGenRunning = false;
+  contextGenFile = null;
+  contextGenOpen = !!contextNotes[file] || false; // reopen the notes panel when notes survive
+  const view = $("#context-view");
+  const form = view.querySelector(".context-editor");
+  form.innerHTML = "";
+
+  const head = el("div", "toolbar");
+  head.appendChild(el("strong", "context-file-label", file));
+  head.appendChild(
+    el(
+      "span",
+      `badge ${exists ? (fresh ? "running" : "ok") : "none"}`,
+      exists ? (fresh ? "new (unsaved)" : "on disk") : "new — Save creates it",
+    ),
+  );
+  head.appendChild(el("span", "spacer"));
+  // AI drafting only applies to per-repo files (that's what reviewers consume
+  // per repository); project-wide/stacks stay hand-written.
+  if (project && repo) {
+    const ai = el("button", "ai", "✨ AI draft");
+    ai.title = "Draft or refine this file from your notes (the bot’s false positives, conventions). Result lands as a reviewable draft — nothing saved until you press Save.";
+    ai.onclick = () => {
+      contextGenOpen = !contextGenOpen;
+      buildContextGenPanel(form, ta);
+    };
+    head.appendChild(ai);
+  }
+  const save = el("button", "primary", "💾 Save");
+  save.onclick = () => saveContextFile();
+  head.appendChild(save);
+  if (exists) {
+    const del = el("button", "danger", "🗑 Delete");
+    del.onclick = () => deleteContextFile();
+    head.appendChild(del);
+  }
+  form.appendChild(head);
+
+  const gen = el("div", "context-gen");
+  gen.hidden = true;
+  form.appendChild(gen);
+
+  const ta = el("textarea", "artifact");
+  const draft = contextDrafts[file];
+  ta.value = draft !== undefined ? draft : fresh && !text ? newRepoTemplate(file) : text;
+  ta.oninput = () => {
+    contextDrafts[file] = ta.value;
+  };
+  form.appendChild(ta);
+
+  const det = el("p", "dim hint");
+  det.innerHTML = exists
+    ? "Edits apply verbatim to the next review of this repo. HTML comments are stripped for the reviewers; stack files keep their <code>match:</code> front matter."
+    : "This file does not exist yet — <b>Save</b> creates it and it takes effect on the next review.";
+  form.appendChild(det);
+
+  if (contextGenOpen) buildContextGenPanel(form, ta);
+}
+
+// The AI-draft notes strip: devs paste false positives / what they need and the
+// agent fills in the rest of the file. Rebuilt on toggle and after generation.
+function buildContextGenPanel(form, ta) {
+  const panel = form.querySelector(".context-gen");
+  if (!panel) return;
+  panel.innerHTML = "";
+  panel.hidden = false;
+  panel.appendChild(
+    el("div", "context-gen-title", "✦ Draft with AI — paste false positives or what the bot should know; the agent writes the whole file from them"),
+  );
+  // "Generating…" only while the ACTIVE editor is the file being generated —
+  // after the user switches files, the other file is not generating.
+  if (contextGenRunning && contextGenFile === contextCurrent?.file) {
+    panel.appendChild(el("p", "dim context-gen-status", "Generating… this can take a minute."));
+    return;
+  }
+  const file = contextCurrent?.file;
+  const notes = el("textarea", "context-gen-notes");
+  notes.placeholder = "e.g. “This flag intentionally reuses the BEN field — never flag it as a breaking change.” …";
+  notes.value = contextNotes[file] || "";
+  notes.oninput = () => {
+    contextNotes[file] = notes.value;
+  };
+  panel.appendChild(notes);
+  const row = el("div", "context-gen-actions");
+  const go = el("button", "primary", "✦ Generate draft");
+  go.disabled = contextGenRunning;
+  go.onclick = () => generateContextDraftInUi(form, ta, notes.value);
+  row.appendChild(go);
+  const status = el("span", "context-gen-status dim");
+  row.appendChild(status);
+  panel.appendChild(row);
+  const hint = el("p", "dim hint");
+  hint.innerHTML =
+    "The draft replaces the editor text. It is grounded on your notes (and the repo’s <code>AGENTS.md</code> when readable) — review it, then <b>Save</b>. Nothing is written to disk until you Save.";
+  panel.appendChild(hint);
+}
+
+async function generateContextDraftInUi(form, ta, notes) {
+  const { file, project, repo, exists } = contextCurrent || {};
+  if (!project || !repo) {
+    return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
+  }
+  const reqFile = file;
+  const existing = ta.value || "";
+  // Send the platform the repo is known on (from repos seen in reviews) so a
+  // GitHub repo is never drafted as Bitbucket; omit it for unseen repos and
+  // let the server pick whichever backend is configured.
+  const known = (state.pulls || []).find((p) => p.app === `${project}/${repo}`);
+  contextGenRunning = true;
+  contextGenFile = reqFile;
+  contextGenOpen = true;
+  buildContextGenPanel(form, ta);
+
+  let res;
+  try {
+    const r = await fetch("/api/contexts/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, repo, notes, existing, platform: known?.platform }),
+    });
+    const j = await r.json();
+    res = { ok: r.ok, error: r.ok ? null : j.error || `HTTP ${r.status}`, text: j.text, model: j.model };
+  } catch (e) {
+    res = { ok: false, error: e.message };
+  }
+
+  // Only this request clears the in-flight flags — never a stale sibling.
+  if (contextGenFile === reqFile) {
+    contextGenRunning = false;
+    contextGenFile = null;
+  }
+  // Cache the draft for its file no matter which editor is visible now.
+  if (res.ok) contextDrafts[reqFile] = res.text;
+  // Stale response: the user switched files while this generation ran. Only
+  // report it — never rebuild the other file's editor; the draft reappears on
+  // reopen.
+  if (contextCurrent?.file !== reqFile) {
+    contextStatus(
+      res.ok
+        ? `AI drafted ${reqFile} (you switched files) — kept as a draft; open it to review.`
+        : `Generation failed for ${reqFile}: ${res.error} (you switched files).`,
+      res.ok ? "ok" : "error",
+    );
+    return;
+  }
+  // Back to the notes+button state (the flags are already cleared above).
+  buildContextGenPanel(form, ta);
+  if (!res.ok) {
+    contextStatus(`Generation failed for ${reqFile}: ${res.error}`, "error");
+    return;
+  }
+  // The draft replaces the editor text and is kept as an unsaved draft.
+  ta.value = res.text;
+  if (!exists) contextCurrent.fresh = true;
+  const st = panelStatus(form);
+  if (st) st.textContent = `AI drafted the file with ${res.model || "the context model"} — review it, then Save.`;
+  contextStatus(`AI drafted ${file}. Review it, then Save to make it live.`, "ok");
+}
+
+function panelStatus(form) {
+  return form.querySelector(".context-gen-actions .context-gen-status");
+}
+
+async function saveContextFile() {
+  const file = contextCurrent?.file;
+  if (!file) return contextStatus("No file selected.", "error");
+  const snapshot = $("#context-view textarea.artifact")?.value ?? "";
+  try {
+    const r = await fetch("/api/contexts/doc", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file, text: snapshot }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    // Only drop the local draft if it still matches what we saved — edits made
+    // while the PUT was in flight are newer than the stored text and survive.
+    if (contextDrafts[file] === snapshot) delete contextDrafts[file];
+    // Keep the repo identity (the ✨ AI draft needs project/repo) and never
+    // clobber a newer selection if the user switched files mid-save.
+    if (contextCurrent?.file === file) {
+      contextCurrent = { ...contextCurrent, file: j.file, exists: true, fresh: false };
+    }
+    await fetchContextDocs().then(() => {
+      updateRepoSuggestions();
+      renderContextView();
+    });
+    contextStatus(`Saved ${j.file} — the next review of this repo will use it.`, "ok");
+  } catch (e) {
+    contextStatus(`Save failed: ${e.message}`, "error");
+  }
+}
+
+async function deleteContextFile() {
+  const file = contextCurrent?.file;
+  if (!file) return;
+  if (!confirm(`Delete ${file}?\n\nThis removes the curated context file. Reviews of that repo will simply lose this context (never a hard failure).`)) return;
+  try {
+    const r = await fetch(`/api/contexts/doc?file=${encodeURIComponent(file)}`, { method: "DELETE" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    delete contextDrafts[file];
+    contextCurrent = null; // no selected doc after a delete
+    await fetchContextDocs().then(() => {
+      updateRepoSuggestions();
+      renderContextView();
+    });
+    contextStatus(`Deleted ${file}.`, "ok");
+  } catch (e) {
+    contextStatus(`Delete failed: ${e.message}`, "error");
+  }
+}
+
 // ---- tiny hand-rolled SVG charts (no external chart library) ----------------
 
 const svgNS = "http://www.w3.org/2000/svg";
@@ -729,7 +1145,7 @@ function chartSVG(buckets, { bars, line, money = false }) {
 // ---------- job detail -------------------------------------------------------
 
 async function selectJob(name) {
-  if (state.mode === "stats") switchMode(state.prevMode || "pulls"); // selecting something closes stats
+  if (state.mode === "stats" || state.mode === "context") switchMode(state.prevMode || "pulls"); // selecting something closes the page
   state.selected = name;
   state.tab = "overview";
   $("#empty-state").hidden = true;
@@ -1719,12 +2135,23 @@ $("#mode-toggle").addEventListener("click", (e) => {
 });
 
 // The header Stats button toggles the (full-width) statistics page on/off,
-// returning to the PR or Jobs mode that was active before it was opened.
+// returning to the PR or Jobs mode that was active before it was opened. Only
+// a PR/Jobs mode updates prevMode — toggling Stats↔Context must not forget
+// the list the user actually came from.
 $("#stats-nav").addEventListener("click", () => {
   if (state.mode === "stats") switchMode(state.prevMode || "pulls");
   else {
-    state.prevMode = state.mode;
+    if (state.mode === "pulls" || state.mode === "jobs") state.prevMode = state.mode;
     switchMode("stats");
+  }
+});
+
+// The header Context button toggles the curated-context editor the same way.
+$("#context-nav").addEventListener("click", () => {
+  if (state.mode === "context") switchMode(state.prevMode || "pulls");
+  else {
+    if (state.mode === "pulls" || state.mode === "jobs") state.prevMode = state.mode;
+    switchMode("context");
   }
 });
 
