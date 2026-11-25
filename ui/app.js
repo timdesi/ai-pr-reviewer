@@ -977,6 +977,24 @@ function renderContextView() {
     }
     for (const r of repos) addKnown(r.project, r.repo);
 
+    // Reclassify top-level "other files" that are actually a known repo's
+    // per-repo context. The server splits per-repo files by an uppercase
+    // project key (`ACME-...`), so a lowercase project like `timdesi` leaves
+    // `timdesi-ai-pr-reviewer.md` in "Other files" — even though it IS that
+    // repo's per-repo file (resolveRepoContextFile resolves timdesi/ai-pr-reviewer
+    // to exactly that name). Match files back to a known repo by their exact
+    // <project>-<repo>.md name so the tree shows ONE real file under its project
+    // folder, instead of doubling it as a grayed "not yet created" entry.
+    for (const [proj, names] of knownByProject) {
+      for (const repoName of names) {
+        const idx = files.findIndex((f) => f.name === `${proj}-${repoName}`);
+        if (idx === -1) continue;
+        const [f] = files.splice(idx, 1);
+        repos.push({ ...f, kind: "repo", project: proj, repo: repoName });
+      }
+    }
+    repos.sort((a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`));
+
     const byProject = new Map();
     for (const r of repos) {
       if (!byProject.has(r.project)) byProject.set(r.project, []);
