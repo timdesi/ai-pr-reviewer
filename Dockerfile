@@ -34,9 +34,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # opencode — pin a specific version in your build (e.g. `@opencode/cli@1.0.9`).
-# `@opencode/cli@latest` is the current npm distribution; swap to a release
-# tarball or your internal mirror if your platform requires it.
-ARG OPENCODE_PKG="@opencode/cli@latest"
+# Do NOT fall back to `@latest`: on deployment it has drifted to v2.0.32, which
+# never emits a `step_finish`/`tokens` event for tool-free agent runs — so the
+# `pr-vision` screenshot transcription (a single tool-free response) loses its
+# usage/cost and the dashboard shows `vision.cost: null` even though the
+# transcription succeeds. v2.4.1 emits `step_finish` + `tokens` for tool-free
+# runs (verified local + against npm `@opencode/cli`); bump deliberately here.
+ARG OPENCODE_PKG="@opencode/cli@2.4.1"
 RUN npm install -g "$OPENCODE_PKG" --no-audit --no-fund
 
 # Image-only dependency: undici's EnvHttpProxyAgent so the app's outbound fetch

@@ -9,7 +9,62 @@ Newest entries come first, so the older `v1.x` image tags appear further down,
 below the `v0.2.x` entries.
 
 ---
- 
+
+## v0.5.9 — 2026-11-25 — Context page: file tree, create stack files, AI draft for stacks
+
+### Context page — folder/file tree in the left pane
+
+- The flat context-file list is now a **collapsible tree**: Project-wide,
+  Per-repo (grouped per project), Other files and Stacks, each folder showing
+  its count. Leaves show real file names (with the `.md` extension), the
+  active file is highlighted, and its ancestor folders auto-expand so it stays
+  in view.
+- Known repos that don't have a context file yet appear as **grayed "not yet
+  created"** entries under their project folder — click to draft, the first
+  Save writes the file. This replaces the old `PROJECT/repo` text box.
+- A per-repo file with a **lowercase project key** no longer shows twice (a
+  grayed entry *and* under Other files): it's matched back to its repo by exact
+  `<project>-<repo>.md` name and shown once, under its project folder.
+
+### Create stack rule files from the tree
+
+- The Stacks folder always shows a **＋ New stack** action: it opens a stack
+  template with an **editable name in the toolbar** (`stacks/<name>.md`);
+  **New** validates the name with the same rule as the server and writes the
+  file on save. Typed text is kept while you edit the name.
+- New per-repo/stack templates no longer embed a "what to write" comment —
+  files on disk are clean, and the guidance moved to the editor hint.
+
+### AI draft for stacks (new + existing)
+
+- The ✨ AI draft button now covers **stack rule files** as well as per-repo
+  files; `/api/contexts/generate` dispatches on `kind: stack` and validates the
+  stack name (injectable runner, same as the repo draft). The `context-gen`
+  agent prompt now documents both per-repo and stack shapes — fresh stacks must
+  start with `match:` YAML front matter, refinements keep it intact.
+- AI drafting now **refines rather than replaces**: the current content is sent
+  as the authoritative base and the agent is told to preserve every still-true
+  rule and add/correct per the notes, never rewriting wholesale.
+- Drafting a **brand-new** stack asks the agent to propose `match:` patterns
+  instead of preserving the empty `match: []` template.
+
+### Fit & finish
+
+- Dropped the 🧠 / 📊 / 💾 / 🗑 emoji for a cleaner look (the ✨ sparkle stays as
+  the AI-draft identity).
+- The editor uses the full available width (removed the 1100px cap).
+- Save toasts are stack-aware; the empty-editor hint no longer shows literal
+  tags.
+
+### Deployment image
+
+- Pin the image's `opencode` CLI to `@opencode/cli@2.4.1`: `@latest` had drifted
+  to a version that never emits `step_finish`/`tokens` for tool-free agent runs,
+  so `pr-vision` screenshot transcription lost its usage/cost (dashboard showed
+  `vision.cost: null`).
+
+---
+
 ## v0.5.8 — 2026-11-25 — App filter (PRs + Jobs), curated-context editor & AI draft, vision reliability
 
 ### Searchable app filter for the PRs and Jobs lists (left sidebar)
