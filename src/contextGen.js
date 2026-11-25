@@ -92,9 +92,40 @@ export function buildContextGenMessage({ project, repo, notes = "", existing = "
     );
   }
   if (existing && existing.trim()) {
-    parts.push("Current content of the file to refine (keep what is still true, fix what drifted, extend per the notes):\n" + existing.trim());
+    parts.push(
+      "Current content of this file. It is already curated — treat it as the authoritative base and PRESERVE it: keep every existing rule and false-positive entry that is still true (never drop or rewrite the file wholesale), fix only what the notes say is wrong, add what they ask for, and remove only what a note explicitly supersedes:\n" +
+        existing.trim(),
+    );
   }
-  parts.push("Write the complete curated context Markdown file for this repository now.");
+  parts.push(
+    "Write the complete curated context Markdown file. If existing content was provided, this is a REFINEMENT of it — every still-true existing rule must survive, verbatim or better-phrased, never silently lost.",
+  );
+  return parts.join("\n\n");
+}
+
+export function buildStackContextGenMessage({ name, notes = "", existing = "" }) {
+  const parts = [
+    `Stack: \`${name}\` — review rules applied to files matching the stack's \`match:\` patterns.`,
+  ];
+  if (notes && notes.trim()) {
+    parts.push(
+      "Developer notes / false positives to encode (their words — rephrase them into concrete review rules, do not simply quote):\n" +
+        notes.trim(),
+    );
+  }
+  if (existing && existing.trim()) {
+    parts.push(
+      "Current content of this file. It is already curated — PRESERVE it: keep the YAML front matter and its match: patterns unchanged unless the notes ask for new patterns, keep every existing rule that is still true, add per the notes, and remove only what a note explicitly supersedes:\n" +
+        existing.trim(),
+    );
+  } else {
+    parts.push(
+      "The file must start with YAML front matter of the form:\n---\nmatch: [\"...\"]\n---\n\nwith one or more regex file-path patterns. Write review rules for files matching those patterns below the front matter.",
+    );
+  }
+  parts.push(
+    "Write the complete stack rules Markdown file. If existing content was provided, this is a refinement — every still-true existing rule must survive, never silently lost.",
+  );
   return parts.join("\n\n");
 }
 
@@ -106,19 +137,8 @@ export function extractContextMarkdown(raw) {
   return t;
 }
 
-/**
- * Draft (or refine) the curated context file for PROJECT/repo.
- * Never writes anything to disk: returns `{ ok, text, model, usage,
- * durationMs }` and the caller (dashboard) shows it as an editable draft.
- * `runner` and `agentsMd` are injectable for tests (defaults: real runAgent,
- * best-effort AGENTS.md fetch). `platform` is "bitbucket"/"github", or absent
- * to resolve from whichever backend is configured. Throws ContextEditorError
- * on validation / agent failure so the API can map it to a clean HTTP status.
- */
-export async function generateContextDraft({ config, project, repo, notes = "", existing = "", platform, runner = runAgent, agentsMd }) {
-  if (!validProjectRepo(project, repo)) {
-    throw new ContextEditorError(400, "project and repo must be letters, digits, `-`, `_` or `.`");
-  }
+// The shared validation + agent-run tail of both repo and stack drafting.
+function assertGenModel(config) {
   const model = pickContextGenModel(config);
   if (!model) {
     throw new ContextEditorError(
@@ -126,18 +146,21 @@ export async function generateContextDraft({ config, project, repo, notes = "", 
       "no model configured for AI context generation — set CONTEXT_GEN_MODEL (or CONSENSUS_MODEL / REVIEWER_MODEL_A)",
     );
   }
+  return model;
+}
+
+function assertNoteSizes(notes, existing) {
   const notesSize = Buffer.byteLength(String(notes ?? ""), "utf8");
-  if (notesSize > MAX_NOTES_BYTES) throw new ContextEditorError(413, `notes too large (${notesSize} bytes; max ${MAX_NOTES_BYTES})`);
+  if (notesSize > MAX_NOTES_BYTES) {
+    throw new ContextEditorError(413, `notes too large (${notesSize} bytes; max ${MAX_NOTES_BYTES})`);
+  }
   const existingSize = Buffer.byteLength(String(existing ?? ""), "utf8");
   if (existingSize > MAX_EXISTING_BYTES) {
     throw new ContextEditorError(413, `existing content too large (${existingSize} bytes; max ${MAX_EXISTING_BYTES})`);
   }
+}
 
-  const repoAgents = agentsMd === undefined
-    ? await fetchRepoAgentsMd(config, { platform: normalizeContextGenPlatform(platform, configuredClients(config)), projectKey: project, repoSlug: repo })
-    : agentsMd;
-  const message = buildContextGenMessage({ project, repo, notes, existing, agentsMd: repoAgents });
-
+async function runContextGen(config, model, message, runner) {
   const res = await runner({
     bin: config.opencode.bin,
     agent: "context-gen",
@@ -167,4 +190,55 @@ export async function generateContextDraft({ config, project, repo, notes = "", 
     stdout: res.stdout || "",
     stderr: res.stderr || "",
   };
+}
+
+/**
+ * Draft (or refine) the curated context file for PROJECT/repo.
+ * Never writes anything to disk: returns `{ ok, text, model, usage,
+ * durationMs }` and the caller (dashboard) shows it as an editable draft.
+ * `runner` and `agentsMd` are injectable for tests (defaults: real runAgent,
+ * best-effort AGENTS.md fetch). `platform` is "bitbucket"/"github", or absent
+ * to resolve from whichever backend is configured. Throws ContextEditorError
+ * on validation / agent failure so the API can map it to a clean HTTP status.
+ */
+export async function generateContextDraft({ config, project, repo, notes = "", existing = "", platform, runner = runAgent, agentsMd }) {
+  if (!validProjectRepo(project, repo)) {
+    throw new ContextEditorError(400, "project and repo must be letters, digits, `-`, `_` or `.`");
+  }
+  const model = assertGenModel(config);
+  assertNoteSizes(notes, existing);
+
+  const repoAgents = agentsMd === undefined
+    ? await fetchRepoAgentsMd(config, { platform: normalizeContextGenPlatform(platform, configuredClients(config)), projectKey: project, repoSlug: repo })
+    : agentsMd;
+  const message = buildContextGenMessage({ project, repo, notes, existing, agentsMd: repoAgents });
+
+  return runContextGen(config, model, message, runner);
+}
+
+/**
+ * Is `name` a valid stack file stub — the exact rule `safeContextFile`
+ * enforces for `stacks/<name>.md` (letters/digits/`-`/`_`/`.`, no leading dot)?
+ */
+export function validStackName(name) {
+  return typeof name === "string" && /^[A-Za-z0-9._-]+$/.test(name) && !name.startsWith(".");
+}
+
+/**
+ * Draft (or refine) a stack rules file — `stacks/<name>.md` — the cross-repo
+ * rules applied to any file whose path matches one of the stack's `match:`
+ * patterns. Same never-writes contract and injectable `runner` as
+ * generateContextDraft, but there is no single repo to ground on (no AGENTS.md
+ * fetch): the agent works purely from the developer's notes plus the existing
+ * content and the required `match:` front matter. Throws ContextEditorError on
+ * validation / agent failure.
+ */
+export async function generateStackContextDraft({ config, name, notes = "", existing = "", runner = runAgent }) {
+  if (!validStackName(name)) {
+    throw new ContextEditorError(400, "stack name must be letters, digits, `-`, `_` or `.` (no leading dot)");
+  }
+  const model = assertGenModel(config);
+  assertNoteSizes(notes, existing);
+  const message = buildStackContextGenMessage({ name, notes, existing });
+  return runContextGen(config, model, message, runner);
 }
