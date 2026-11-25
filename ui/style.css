@@ -419,18 +419,32 @@ aside[hidden] { display: none; }
 #context-nav.active { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
 #context-view { max-width: 1100px; }
 .context-layout { display: flex; gap: 16px; align-items: flex-start; }
-.context-list { width: 320px; min-width: 280px; flex: none; }
+.context-list { width: 340px; min-width: 300px; flex: none; max-height: calc(100vh - 220px); overflow-y: auto; }
 .context-list h4 { margin: 14px 0 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
 .context-list h4:first-of-type { margin-top: 2px; }
-.context-files { list-style: none; margin: 0 0 4px; padding: 0; }
-.context-files li { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+
+/* File tree in the left pane: collapsible folders, indented file leaves. */
+.context-tree { list-style: none; margin: 6px 0 4px; padding: 0; }
+.context-tree ul { list-style: none; margin: 0; padding: 0 0 2px 14px; }
+.tree-folder > ul { display: none; }
+.tree-folder.open > ul { display: block; }
+button.tree-folder-label {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: none; border: none; color: var(--text); padding: 4px 8px;
+  border-radius: 7px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+button.tree-folder-label:hover { background: var(--bg3); }
+.tree-caret { color: var(--dim); font-size: 10px; flex: none; width: 12px; text-align: center; }
+.tree-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+.tree-file { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.tree-file.active button.context-file { border-color: var(--accent); background: var(--bg3); }
 button.context-file {
   flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-family: var(--mono); font-size: 12px; padding: 5px 10px;
-  border: 1px solid var(--border); border-radius: 7px; background: var(--bg);
+  border: 1px solid transparent; border-radius: 7px; background: none;
   color: var(--text);
 }
-button.context-file:hover { border-color: var(--accent); }
+button.context-file:hover { border-color: var(--accent); background: var(--bg3); }
 .context-match { font-size: 10px; color: var(--dim); flex: none; }
 .context-new { border-top: 1px dashed var(--border); margin-top: 14px; padding-top: 10px; }
 .context-new-row { display: flex; gap: 8px; }

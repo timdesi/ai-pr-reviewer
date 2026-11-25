@@ -845,6 +845,8 @@ const contextNotes = {}; // file -> developer notes for AI drafting (kept per fi
 let contextGenOpen = false; // is the AI-draft notes panel expanded?
 let contextGenRunning = false; // a generation call is in flight
 let contextGenFile = null; // which file the in-flight generation belongs to
+// Expand/collapse state of the context-tree folders (default: expanded).
+const contextTreeFolders = { project: true, repo: true, file: true, stacks: true };
 
 function contextStatus(msg, kind = "error") {
   const n = el("div", `notice ${kind}`, msg);
@@ -915,28 +917,63 @@ function renderContextView() {
     const list = el("div", "context-list card");
     list.appendChild(el("h3", "", "Context files"));
 
-    const group = (title, items) => {
-      if (!items.length) return;
-      list.appendChild(el("h4", "", title));
-      const ul = el("ul", "context-files");
-      for (const it of items) {
-        const li = el("li");
-        const label = it.kind === "repo" ? `${it.project}/${it.repo}` : it.name;
-        const b = el("button", "context-file", label);
-        b.title = it.file;
-        b.onclick = () => openContextFile(it.file, { project: it.project, repo: it.repo });
-        li.appendChild(b);
-        if (it.kind === "stack" && (!it.match || !it.match.length)) {
-          li.appendChild(el("span", "dim context-match", "no match"));
-        }
-        ul.appendChild(li);
-      }
-      list.appendChild(ul);
+    const tree = el("ul", "context-tree");
+
+    // A collapsible folder: click toggles open/closed (state kept in
+    // contextTreeFolders so it survives re-renders).
+    const folderLi = (key, label, children) => {
+      const open = contextTreeFolders[key] !== false;
+      const li = el("li", `tree-folder${open ? " open" : ""}`);
+      li.dataset.folder = key;
+      const head = el("button", "tree-folder-label");
+      head.appendChild(el("span", "tree-caret", open ? "▾" : "▸"));
+      head.appendChild(el("span", "tree-folder-name", label));
+      head.onclick = () => {
+        contextTreeFolders[key] = !contextTreeFolders[key];
+        li.classList.toggle("open", contextTreeFolders[key]);
+      };
+      li.appendChild(head);
+      const ul = el("ul", "tree-children");
+      for (const c of children) ul.appendChild(c);
+      li.appendChild(ul);
+      return li;
     };
-    group("Project-wide", docs.top.filter((t) => t.kind === "project"));
-    group("Per-repo", docs.top.filter((t) => t.kind === "repo"));
-    group("Other files", docs.top.filter((t) => t.kind === "file"));
-    group("Stacks", docs.stacks);
+
+    // A file leaf: click opens it in the right-side editor.
+    const fileLi = (it, label) => {
+      const li = el("li", `tree-file${contextCurrent?.file === it.file ? " active" : ""}`);
+      li.dataset.file = it.file;
+      const b = el("button", "context-file", label);
+      b.title = it.file;
+      b.onclick = () => openContextFile(it.file, { project: it.project, repo: it.repo });
+      li.appendChild(b);
+      if (it.kind === "stack" && (!it.match || !it.match.length)) {
+        li.appendChild(el("span", "dim context-match", "no match"));
+      }
+      return li;
+    };
+
+    const projects = docs.top.filter((t) => t.kind === "project").sort((a, b) => a.name.localeCompare(b.name));
+    const repos = docs.top.filter((t) => t.kind === "repo").sort((a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`));
+    const files = docs.top.filter((t) => t.kind === "file").sort((a, b) => a.name.localeCompare(b.name));
+    const stacks = [...docs.stacks].sort((a, b) => a.name.localeCompare(b.name));
+
+    const repoChildren = [];
+    const byProject = new Map();
+    for (const r of repos) {
+      const p = r.project || "?";
+      if (!byProject.has(p)) byProject.set(p, []);
+      byProject.get(p).push(r);
+    }
+    for (const [proj, items] of [...byProject.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      repoChildren.push(folderLi(`repo:${proj}`, `${proj} (${items.length})`, items.map((r) => fileLi(r, r.repo))));
+    }
+
+    if (projects.length) tree.appendChild(folderLi("project", `Project-wide (${projects.length})`, projects.map((t) => fileLi(t, t.name))));
+    if (repoChildren.length) tree.appendChild(folderLi("repo", `Per-repo (${repos.length})`, repoChildren));
+    if (files.length) tree.appendChild(folderLi("file", `Other files (${files.length})`, files.map((t) => fileLi(t, t.name))));
+    if (stacks.length) tree.appendChild(folderLi("stacks", `Stacks (${stacks.length})`, stacks.map((t) => fileLi(t, t.name))));
+    list.appendChild(tree);
 
     // Create-new per-repo form (PROJ/repo, with suggestions).
     const mk = el("div", "context-new");
@@ -990,12 +1027,33 @@ function renderContextView() {
   else fetchContextDocs().then(build);
 }
 
+// Highlight the currently-open file in the tree (no full re-render needed) and
+// make sure its ancestor folders are expanded so it stays visible.
+function markContextTreeActive() {
+  const cur = contextCurrent?.file;
+  for (const li of document.querySelectorAll("#context-view .context-tree .tree-file")) {
+    const active = cur && li.dataset.file === cur;
+    li.classList.toggle("active", !!active);
+    if (active) {
+      // Walk up through ancestor li.tree-folder nodes, force them open and
+      // remember the state so the next re-render keeps them expanded.
+      for (let a = li.parentElement; a && a !== document.body; a = a.parentElement) {
+        if (a.classList?.contains("tree-folder")) {
+          a.classList.add("open");
+          if (a.dataset.folder) contextTreeFolders[a.dataset.folder] = true;
+        }
+      }
+    }
+  }
+}
+
 async function openContextFile(file, { quiet = false, project = null, repo = null } = {}) {
   try {
     const r = await fetch(`/api/contexts/doc?file=${encodeURIComponent(file)}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `/api/contexts/doc HTTP ${r.status}`);
     setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: false, project, repo });
+    markContextTreeActive();
   } catch (e) {
     if (!quiet) contextStatus(`Could not open ${file}: ${e.message}`, "error");
   }
@@ -1012,6 +1070,7 @@ async function openRepoFromInput() {
     if (!r.ok) throw new Error(j.error || `/api/contexts/repo HTTP ${r.status}`);
     // exists=false → the editor shows a template; Save creates the file.
     setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: !j.exists, project, repo });
+    markContextTreeActive(); // highlight the tree node for this repo, if present
   } catch (e) {
     contextStatus(e.message, "error");
   }
