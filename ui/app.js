@@ -196,6 +196,17 @@ function renderListPager({ listEl, pagerEl, page, total, onNav }) {
   pagerEl.appendChild(next);
 }
 
+// The pulls-list key of a job's PR ("" when the job has no usable ref) — used
+// to cross-reference `state.pulls` (which namespaces GitHub refs), so a job
+// whose PR is merged/declined/gone is shown as a closed story instead of an
+// active run.
+function jobPullKey(job) {
+  const r = job.ref;
+  if (!r || r.projectKey == null || r.repoSlug == null || r.prId == null) return "";
+  const base = `${r.projectKey}/${r.repoSlug}#${r.prId}`;
+  return (r.platform || "bitbucket") === "github" ? `github:${base}` : base;
+}
+
 function renderJobList() {
   const ul = $("#job-list");
   ul.innerHTML = "";
@@ -207,7 +218,11 @@ function renderJobList() {
     renderListPager({ listEl: ul, pagerEl: $("#job-pager"), page: state.jobPage, total: 0, onNav: noop });
     return;
   }
-  const running = state.jobs.some((j) => ["fetch", "review", "consensus", "render", "publish"].includes(j.stage));
+  // PRs on this page whose PR is merged/declined/superseded/gone: those jobs
+  // are finished stories, not active runs — a run left "in progress" at merge
+  // is orphaned, so it must not keep the backend pill on "run in progress".
+  const deadKeys = new Set((state.pulls || []).filter((p) => p.unreviewable).map((p) => p.key));
+  const running = state.jobs.some((j) => ["fetch", "review", "consensus", "render", "publish"].includes(j.stage) && !deadKeys.has(jobPullKey(j)));
   state.running = running;
   $("#backend-state").textContent = running ? "run in progress" : "idle";
   $("#backend-state").className = "pill" + (running ? " live" : "");
@@ -218,11 +233,22 @@ function renderJobList() {
   for (const job of state.jobs) {
     const li = el("li");
     if (job.job === state.selected) li.classList.add("active");
+    const pr = (state.pulls || []).find((p) => p.key === jobPullKey(job)) || null;
+    const dead = !!(pr?.unreviewable);
+    // A job whose PR is merged/declined shows the PR's terminal state (dimmed),
+    // never a "running"/"complete" badge that reads as an active review.
+    let badgeCls = job.stage === "complete" ? "ok" : job.stage === "failed" ? "failed" : "running";
+    let badgeLabel = stageLabel(job.stage);
+    if (dead) {
+      const t = pullBadge(pr);
+      badgeCls = t.cls;
+      badgeLabel = t.label;
+      li.classList.add("closed");
+    }
     li.appendChild(el("span", "job-title", job.title || job.job));
     const sub = el("span", "job-sub");
     if (job.reviewedSha) sub.appendChild(el("span", "sha", sha(job.reviewedSha)));
-    const badge = el("span", `badge ${job.stage === "complete" ? "ok" : job.stage === "failed" ? "failed" : "running"}`, stageLabel(job.stage));
-    sub.appendChild(badge);
+    sub.appendChild(el("span", `badge ${badgeCls}`, badgeLabel));
     sub.appendChild(el("span", "", fmtTime(job.startedAt)));
     li.appendChild(sub);
     li.onclick = () => {

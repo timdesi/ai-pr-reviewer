@@ -317,9 +317,9 @@ table.artifacts tr.file-row:hover { background: var(--bg3); }
 #pulls-list li.active { border-color: var(--accent); background: var(--bg3); }
 
 /* Merged / declined / superseded PRs: dimmed and not re-reviewable. */
-#pulls-list li.closed { opacity: .55; }
-#pulls-list li.closed:hover { opacity: .8; }
-#pulls-list li.closed .job-title { color: var(--dim); }
+#pulls-list li.closed, #job-list li.closed { opacity: .55; }
+#pulls-list li.closed:hover, #job-list li.closed:hover { opacity: .8; }
+#pulls-list li.closed .job-title, #job-list li.closed .job-title { color: var(--dim); }
 .badge.merged { color: #9fb0cf; border-color: #4d5d80; }
 /* 404'd (deleted after merge/decline) PRs look like merged: dimmed, terminal. */
 .badge.closed { color: #9fb0cf; border-color: #4d5d80; }

@@ -27,6 +27,17 @@ below the `v0.2.x` entries.
   apps whose PRs are merged/gone still appear in the picker. App counts are
   TTL-cached client-side and fetched on demand, never on every poll.
 
+### Jobs list: merged/declined PRs no longer look like active runs
+
+- A job whose PR has been merged/declined/superseded (or deleted) is now shown
+  as a **closed story**: the row is dimmed and the badge shows the PR's
+  terminal state (`merged` / `declined` / …) instead of the job's stage — so a
+  run left "in progress" at merge time stops looking active. The list
+  cross-references the PR view (including the `github:` namespace for GitHub),
+  so the two lists agree.
+- The header "run in progress" pill ignores orphaned running jobs whose PR is
+  already closed.
+
 ### Curated-context editor (dashboard)
 
 - **The team can now edit review context from the dashboard.** A new **🧠
