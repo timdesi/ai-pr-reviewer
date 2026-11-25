@@ -866,14 +866,12 @@ async function fetchContextDocs() {
   return contextDocs;
 }
 
-// Starter body for a per-repo file that does not exist yet.
+// Starter body for a per-repo file that does not exist yet. Deliberately lean:
+// the "what to write" guidance lives in the editor hint below, not in the file,
+// so a freshly created file on disk carries no leftover boilerplate.
 function newRepoTemplate(file) {
   const name = file.replace(/\.md$/, "");
   return `# ${name} — curated review context
-
-<!-- Facts about this repository that reviewers should always respect: domain
-conventions, the repo's role, things NOT visible in a diff. HTML comments are
-stripped before the text reaches the reviewers. -->
 `;
 }
 
@@ -886,10 +884,6 @@ match: []
 ---
 
 # ${name} — stack review rules
-
-<!-- Files matching one of the patterns above get these rules. Add patterns
-such as ["\\\\.java$"] then describe the conventions reviewers must follow for
-those files. HTML comments are stripped before the text reaches reviewers. -->
 `;
 }
 
@@ -1173,9 +1167,13 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
   form.appendChild(ta);
 
   const det = el("p", "dim hint");
-  det.innerHTML = exists
-    ? "Edits apply verbatim to the next review of this repo. HTML comments are stripped for the reviewers; stack files keep their <code>match:</code> front matter."
-    : "This file is <b>not on disk yet</b> — <b>New</b> writes it and it takes effect on the next review.";
+  det.innerHTML = !exists
+    ? isStack
+      ? "This file is <b>not on disk yet</b> — <b>New</b> writes it. Fill <code>match:</code> with one or more file-path patterns, then list the review rules those files must follow."
+      : "This file is <b>not on disk yet</b> — <b>New</b> writes it. Start with the repo's role, its key conventions, and any known false positives."
+    : isStack
+      ? "Edits apply verbatim to the next review of matching files; keep the <code>match:</code> front matter."
+      : "Edits apply verbatim to the next review of this repo. HTML comments are stripped for the reviewers, so use them for meta-notes you don't want reviewers to see.";
   form.appendChild(det);
 
   if (contextGenOpen) buildContextGenPanel(form, ta);
