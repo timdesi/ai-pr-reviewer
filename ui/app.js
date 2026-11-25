@@ -866,24 +866,6 @@ async function fetchContextDocs() {
   return contextDocs;
 }
 
-// The "New per-repo" input suggests apps already seen in PR reviews plus every
-// per-repo context file already on disk (PROJ/repo form).
-function updateRepoSuggestions() {
-  const dl = $("#repo-suggestions");
-  if (!dl) return;
-  dl.innerHTML = "";
-  const seen = new Set();
-  const add = (v) => {
-    if (!v || seen.has(v)) return;
-    seen.add(v);
-    dl.appendChild(new Option(v));
-  };
-  for (const p of state.pulls) add(p.app);
-  for (const t of contextDocs?.top || []) {
-    if (t.kind === "repo" && t.project) add(`${t.project}/${t.repo}`);
-  }
-}
-
 // Starter body for a per-repo file that does not exist yet.
 function newRepoTemplate(file) {
   const name = file.replace(/\.md$/, "");
@@ -895,11 +877,26 @@ stripped before the text reaches the reviewers. -->
 `;
 }
 
+// Starter body for a new stack rule file (stacks/<name>.md). The `match: []`
+// front matter is required so the file is recognized as a stack; reviewers get
+// the rules below for every file whose path matches one of the patterns.
+function newStackTemplate(name) {
+  return `---
+match: []
+---
+
+# ${name} — stack review rules
+
+<!-- Files matching one of the patterns above get these rules. Add patterns
+such as ["\\\\.java$"] then describe the conventions reviewers must follow for
+those files. HTML comments are stripped before the text reaches reviewers. -->
+`;
+}
+
 function renderContextView() {
   const view = $("#context-view");
   const build = (docs) => {
     view.innerHTML = "";
-    updateRepoSuggestions();
 
     const toolbar = el("div", "toolbar");
     const hint = el("span", "dim context-hint");
@@ -953,61 +950,84 @@ function renderContextView() {
       return li;
     };
 
+    // A grayed "known repo, no file yet" leaf: click opens the create-editor;
+    // the first Save writes the file. (Repo appeared in a review or has a
+    // sibling per-repo file.)
+    const newRepoLeaf = (project, repo) => {
+      const li = el("li", "tree-file tree-file-new");
+      li.dataset.file = `${project}-${repo}.md`;
+      const b = el("button", "context-file", `${repo}.md`);
+      b.title = `No ${project}/${repo} context yet — click to draft, Save creates it.`;
+      b.onclick = () => openRepoContext(project, repo);
+      li.appendChild(b);
+      return li;
+    };
+
     const projects = docs.top.filter((t) => t.kind === "project").sort((a, b) => a.name.localeCompare(b.name));
     const repos = docs.top.filter((t) => t.kind === "repo").sort((a, b) => `${a.project}/${a.repo}`.localeCompare(`${b.project}/${b.repo}`));
     const files = docs.top.filter((t) => t.kind === "file").sort((a, b) => a.name.localeCompare(b.name));
     const stacks = [...docs.stacks].sort((a, b) => a.name.localeCompare(b.name));
 
-    const repoChildren = [];
+    // Every repo we know about (saw in a review, or already has a per-repo
+    // file). Repos with no file yet are offered as grayed leaves under their
+    // project folder and are created on the first Save.
+    const knownByProject = new Map();
+    const addKnown = (project, repo) => {
+      if (!project || !repo) return;
+      if (!knownByProject.has(project)) knownByProject.set(project, new Set());
+      knownByProject.get(project).add(repo);
+    };
+    for (const p of state.pulls || []) {
+      const m = String(p.app || "").split("/");
+      if (m.length === 2) addKnown(m[0], m[1]);
+    }
+    for (const r of repos) addKnown(r.project, r.repo);
+
     const byProject = new Map();
     for (const r of repos) {
-      const p = r.project || "?";
-      if (!byProject.has(p)) byProject.set(p, []);
-      byProject.get(p).push(r);
+      if (!byProject.has(r.project)) byProject.set(r.project, []);
+      byProject.get(r.project).push(r);
     }
-    for (const [proj, items] of [...byProject.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      repoChildren.push(folderLi(`repo:${proj}`, `${proj} (${items.length})`, items.map((r) => fileLi(r, r.repo))));
+    let missingTotal = 0;
+    const repoChildren = [];
+    for (const proj of [...new Set([...byProject.keys(), ...knownByProject.keys()])].sort((a, b) => a.localeCompare(b))) {
+      const existing = byProject.get(proj) || [];
+      const existingNames = new Set(existing.map((r) => r.repo));
+      const missing = [...(knownByProject.get(proj) || [])]
+        .filter((n) => !existingNames.has(n))
+        .sort((a, b) => a.localeCompare(b));
+      missingTotal += missing.length;
+      const kids = [
+        ...existing.map((r) => fileLi(r, `${r.repo}.md`)),
+        ...missing.map((n) => newRepoLeaf(proj, n)),
+      ];
+      repoChildren.push(folderLi(`repo:${proj}`, `${proj} (${kids.length})`, kids));
     }
 
-    if (projects.length) tree.appendChild(folderLi("project", `Project-wide (${projects.length})`, projects.map((t) => fileLi(t, t.name))));
-    if (repoChildren.length) tree.appendChild(folderLi("repo", `Per-repo (${repos.length})`, repoChildren));
-    if (files.length) tree.appendChild(folderLi("file", `Other files (${files.length})`, files.map((t) => fileLi(t, t.name))));
-    if (stacks.length) tree.appendChild(folderLi("stacks", `Stacks (${stacks.length})`, stacks.map((t) => fileLi(t, t.name))));
+    if (projects.length) tree.appendChild(folderLi("project", `Project-wide (${projects.length})`, projects.map((t) => fileLi(t, `${t.name}.md`))));
+    if (repoChildren.length) tree.appendChild(folderLi("repo", `Per-repo (${repos.length + missingTotal})`, repoChildren));
+    if (files.length) tree.appendChild(folderLi("file", `Other files (${files.length})`, files.map((t) => fileLi(t, `${t.name}.md`))));
+    // The Stacks folder always shows an "add new stack" action (grayed, like a
+    // not-yet-created repo): click it, name the file, New writes stacks/<name>.md.
+    const stackChildren = stacks.map((t) => fileLi(t, `${t.name}.md`));
+    stackChildren.push(
+      (() => {
+        const li = el("li", "tree-file tree-file-new");
+        const b = el("button", "context-file", "＋ New stack");
+        b.title = "Create a new stack rule file (stacks/<name>.md) — name it in the editor, then press New.";
+        b.onclick = () => openNewStack();
+        li.appendChild(b);
+        return li;
+      })(),
+    );
+    tree.appendChild(folderLi("stacks", `Stacks (${stacks.length})`, stackChildren));
     list.appendChild(tree);
 
-    // Create-new per-repo form (PROJ/repo, with suggestions).
-    const mk = el("div", "context-new");
-    mk.appendChild(el("h4", "", "New per-repo context"));
-    mk.appendChild(
-      el(
-        "p",
-        "dim hint",
-        "Type PROJECT/repo (suggestions: repos seen in reviews). Opens the existing file, or starts a new <code>PROJECT-repo.md</code> to create on save.",
-      ),
-    );
-    const row = el("div", "context-new-row");
-    const input = el("input", "context-new-input");
-    input.type = "text";
-    input.placeholder = "PROJECT/repo";
-    input.setAttribute("list", "repo-suggestions");
-    input.spellcheck = false;
-    input.onkeydown = (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        openRepoFromInput();
-      }
-    };
-    row.appendChild(input);
-    const go = el("button", "", "＋ Open / new");
-    go.onclick = () => openRepoFromInput();
-    row.appendChild(go);
-    mk.appendChild(row);
-    list.appendChild(mk);
     layout.appendChild(list);
 
     const editor = el("div", "context-editor");
     editor.appendChild(
-      el("div", "empty", "Pick a context file on the left, or type PROJECT/repo above to open (or create) its context."),
+      el("div", "empty", "Pick a context file in the tree on the left. Grayed repos have no context yet — click one to draft it and press <b>New</b>."),
     );
     layout.appendChild(editor);
     view.appendChild(layout);
@@ -1059,11 +1079,7 @@ async function openContextFile(file, { quiet = false, project = null, repo = nul
   }
 }
 
-async function openRepoFromInput() {
-  const v = ($("#context-view .context-new-input")?.value || "").trim();
-  const m = v.match(/^([^/]+)\/([^/]+)$/);
-  if (!m) return contextStatus("Enter PROJECT/repo, e.g. ACME/acme-app.", "error");
-  const [, project, repo] = m;
+async function openRepoContext(project, repo) {
   try {
     const r = await fetch(`/api/contexts/repo?project=${encodeURIComponent(project)}&repo=${encodeURIComponent(repo)}`);
     const j = await r.json();
@@ -1076,8 +1092,11 @@ async function openRepoFromInput() {
   }
 }
 
-function setContextEditor({ file, exists, text, fresh, project = null, repo = null }) {
-  contextCurrent = { file, exists, fresh, project, repo };
+function setContextEditor({ file, exists, text, fresh, project = null, repo = null, name = null }) {
+  // `name` set (not null) means a brand-new stack file being named in the
+  // editor: the toolbar shows stacks/<name-input>.md, and New writes it.
+  const creatingStack = name !== null;
+  contextCurrent = { file, exists, fresh, project, repo, name };
   contextGenRunning = false;
   contextGenFile = null;
   contextGenOpen = !!contextNotes[file] || false; // reopen the notes panel when notes survive
@@ -1086,12 +1105,33 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
   form.innerHTML = "";
 
   const head = el("div", "toolbar");
-  head.appendChild(el("strong", "context-file-label", file));
+  if (creatingStack) {
+    const pre = el("span", "dim context-file-label", "stacks/");
+    head.appendChild(pre);
+    const ni = el("input", "context-new-stack-name");
+    ni.value = name;
+    ni.placeholder = "stack-name";
+    ni.spellcheck = false;
+    ni.autocomplete = "off";
+    ni.oninput = () => {
+      contextCurrent.name = ni.value.trim();
+    };
+    ni.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveContextFile();
+      }
+    };
+    head.appendChild(ni);
+    head.appendChild(el("span", "dim context-file-label", ".md"));
+  } else {
+    head.appendChild(el("strong", "context-file-label", file));
+  }
   head.appendChild(
     el(
       "span",
       `badge ${exists ? (fresh ? "running" : "ok") : "none"}`,
-      exists ? (fresh ? "new (unsaved)" : "on disk") : "new — Save creates it",
+      exists ? (fresh ? "new (unsaved)" : "on disk") : "new — New creates it",
     ),
   );
   head.appendChild(el("span", "spacer"));
@@ -1106,7 +1146,10 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
     };
     head.appendChild(ai);
   }
-  const save = el("button", "primary", "💾 Save");
+  // For a brand-new file (not yet on disk) the primary action reads "New" so
+  // it's clear this writes a new file rather than updating an existing one.
+  const save = el("button", "primary", exists ? "💾 Save" : "💾 New");
+  save.title = exists ? "Save changes to this context file" : "Create this new context file on disk";
   save.onclick = () => saveContextFile();
   head.appendChild(save);
   if (exists) {
@@ -1131,7 +1174,7 @@ function setContextEditor({ file, exists, text, fresh, project = null, repo = nu
   const det = el("p", "dim hint");
   det.innerHTML = exists
     ? "Edits apply verbatim to the next review of this repo. HTML comments are stripped for the reviewers; stack files keep their <code>match:</code> front matter."
-    : "This file does not exist yet — <b>Save</b> creates it and it takes effect on the next review.";
+    : "This file is <b>not on disk yet</b> — <b>New</b> writes it and it takes effect on the next review.";
   form.appendChild(det);
 
   if (contextGenOpen) buildContextGenPanel(form, ta);
@@ -1242,7 +1285,18 @@ function panelStatus(form) {
 }
 
 async function saveContextFile() {
-  const file = contextCurrent?.file;
+  // A creating-stack editor holds the name in contextCurrent.name; resolve it
+  // to the real stacks/<name>.md file (validated the same way the server does)
+  // before saving.
+  let file;
+  if (contextCurrent?.name != null) {
+    file = resolveStackFile(contextCurrent.name);
+    if (!file) {
+      return contextStatus("Give the stack a valid name, e.g. java-spring (letters/digits/`-`/`_`, no leading dot).", "error");
+    }
+  } else {
+    file = contextCurrent?.file;
+  }
   if (!file) return contextStatus("No file selected.", "error");
   const snapshot = $("#context-view textarea.artifact")?.value ?? "";
   try {
@@ -1253,22 +1307,42 @@ async function saveContextFile() {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-    // Only drop the local draft if it still matches what we saved — edits made
-    // while the PUT was in flight are newer than the stored text and survive.
-    if (contextDrafts[file] === snapshot) delete contextDrafts[file];
+    // Drop the local draft (the temp .new key for a fresh stack, else the file)
+    // only if it still matches what we saved — edits made while the PUT was in
+    // flight are newer than the stored text and survive.
+    for (const k of [file, "stacks/.new"]) {
+      if (contextDrafts[k] === snapshot) delete contextDrafts[k];
+    }
     // Keep the repo identity (the ✨ AI draft needs project/repo) and never
     // clobber a newer selection if the user switched files mid-save.
-    if (contextCurrent?.file === file) {
-      contextCurrent = { ...contextCurrent, file: j.file, exists: true, fresh: false };
+    if (contextCurrent?.file === file || contextCurrent?.name != null) {
+      contextCurrent = { ...contextCurrent, file: j.file, name: null, exists: true, fresh: false };
     }
     await fetchContextDocs().then(() => {
-      updateRepoSuggestions();
       renderContextView();
     });
     contextStatus(`Saved ${j.file} — the next review of this repo will use it.`, "ok");
   } catch (e) {
     contextStatus(`Save failed: ${e.message}`, "error");
   }
+}
+
+// A new stack's name → stacks/<name>.md, or null when the name is invalid.
+// Same rule the server enforces: letters/digits/`-`/`_`/`.`, no leading dot.
+function resolveStackFile(name) {
+  const n = String(name || "").trim().replace(/\.md$/i, "");
+  if (!/^[A-Za-z0-9._-]+$/.test(n) || n.startsWith(".")) return null;
+  return `stacks/${n}.md`;
+}
+
+// Start a brand-new stack file in the editor: template body + an editable name
+// in the toolbar; New writes stacks/<name>.md.
+function openNewStack() {
+  const draftKey = "stacks/.new"; // stable key for in-progress text while the name is editable
+  const template = newStackTemplate("new-stack");
+  if (contextDrafts[draftKey] === undefined) contextDrafts[draftKey] = template;
+  setContextEditor({ file: draftKey, exists: false, text: contextDrafts[draftKey], fresh: true, name: "" });
+  markContextTreeActive();
 }
 
 async function deleteContextFile() {
@@ -1282,7 +1356,6 @@ async function deleteContextFile() {
     delete contextDrafts[file];
     contextCurrent = null; // no selected doc after a delete
     await fetchContextDocs().then(() => {
-      updateRepoSuggestions();
       renderContextView();
     });
     contextStatus(`Deleted ${file}.`, "ok");
