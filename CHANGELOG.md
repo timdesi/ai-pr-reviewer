@@ -10,7 +10,7 @@ below the `v0.2.x` entries.
 
 ---
  
-## Unreleased
+## v0.5.8 — 2026-11-25 — App filter (PRs + Jobs), curated-context editor & AI draft, vision reliability
 
 ### Searchable app filter for the PRs and Jobs lists (left sidebar)
 
