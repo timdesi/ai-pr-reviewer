@@ -207,6 +207,15 @@ team tunes what the reviewers "know" about a repository:
   `repo.md`) is attached verbatim to every review of that repo. Type
   `PROJECT/repo` (suggestions come from repos the dashboard has seen) to open
   the existing file or start a new one; **Save** creates it.
+- **✨ AI draft** fills the file for you: open (or create) the per-repo context,
+  press the button and **paste false positives or anything the bot should
+  know** — the dedicated `context-gen` agent writes the whole file from your
+  notes, grounded on the repo's own `AGENTS.md` when readable. The draft lands
+  in the editor for you to review, then **Save**; nothing is written to disk
+  automatically (curated context is authoritative to reviewers, so a human
+  always reviews the draft). Needs a drafting model: `CONTEXT_GEN_MODEL` (or
+  falls back to `CONSENSUS_MODEL` → `REVIEWER_MODEL_A`); with none set, the
+  button is hidden.
 - **Project-wide** (`PROJECT.md`) and **stack rules** (`stacks/*.md`) are
   listed and editable the same way — keep a stack's leading
   `--- match: [...] ---` front matter intact.

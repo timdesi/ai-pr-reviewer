@@ -427,8 +427,25 @@ button.context-file:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
 button.danger { color: var(--red); border-color: var(--red); background: #380d13; }
 button.danger:hover { background: #4c121b; }
+button.ai { color: var(--magenta); border-color: var(--magenta); background: #2b1038; }
+button.ai:hover { background: #3b1449; }
 #context-view .toolbar .badge { flex: none; }
 #context-view .notice { margin-top: 0; }
+
+/* AI draft panel (notes box that turns into a drafted context file). */
+.context-gen {
+  border: 1px dashed var(--magenta); border-radius: 10px; padding: 10px 12px;
+  background: rgba(232, 121, 249, 0.05); margin-bottom: 10px;
+}
+.context-gen-title { font-size: 12px; color: var(--magenta); font-weight: 600; margin-bottom: 8px; }
+textarea.context-gen-notes {
+  width: 100%; min-height: 96px; background: #0b0f19; color: #c8d3ea;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-family: var(--mono); font-size: 12px; resize: vertical;
+}
+.context-gen-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.context-gen-status { font-size: 12px; }
+
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .kpi {

@@ -165,6 +165,7 @@ The ones you'll touch first:
 | `REVIEWER_MODEL_A/B/C/D` · `CONSENSUS_MODEL` · `VISION_MODEL` | Which model plays which role |
 | `COMMENT_MIN_SEVERITY` · `COMMENT_MIN_CONFIDENCE` | Gate for what appears in the public comment |
 | `REVIEW_CONTEXT_DIR` · `FETCH_REPO_CONTEXT` | Per-repo curated context and `AGENTS.md` |
+| `CONTEXT_GEN_MODEL` | Model that drafts context files from the dashboard (falls back to consensus) |
 | `REVIEWER_PARALLELISM` | `0` = all reviewers in parallel, `1` = one at a time (small hosts) |
 
 > A Bitbucket-only or GitHub-only instance simply fills in one block and leaves
@@ -209,6 +210,17 @@ file names strictly (only `.md` under `REVIEW_CONTEXT_DIR`/`stacks`, no path
 traversal) and writes atomically, so a crash mid-save can't leave a truncated
 file behind. Like the rest of the dashboard this is local to the pod: edits
 land on that host's disk and are not version-controlled.
+
+**✨ AI draft** does the heavy lifting when a repo has no context yet, or when
+the team wants the bot to learn something. Paste **false positives and notes**
+("don't flag the BEN field reuse", "this repo is the backend only") and the
+dedicated `context-gen` agent ([prompts/context-gen-base.md](prompts/context-gen-base.md))
+writes the whole file from them — grounded on the repo's own `AGENTS.md` when
+readable. The result appears in the editor as a **reviewable draft** and is only
+written to disk when you press **Save**, because curated context is
+authoritative to reviewers. The drafting model is `CONTEXT_GEN_MODEL` (falling
+back to the consensus model, then reviewer A); with none configured the button
+is hidden.
 
 ## How it works
 

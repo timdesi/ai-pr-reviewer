@@ -661,8 +661,11 @@ function buildStatsView(view, s) {
 // Deletes are confirmed; unsaved text is kept per file across views.
 
 let contextDocs = null; // last /api/contexts payload
-let contextCurrent = null; // { file, exists, fresh } of the doc in the editor
+let contextCurrent = null; // { file, exists, fresh, project, repo } of the doc in the editor
 const contextDrafts = {}; // file -> unsaved textarea text
+const contextNotes = {}; // file -> developer notes for AI drafting (kept per file)
+let contextGenOpen = false; // is the AI-draft notes panel expanded?
+let contextGenRunning = false; // a generation call is in flight
 
 function contextStatus(msg, kind = "error") {
   const n = el("div", `notice ${kind}`, msg);
@@ -742,7 +745,7 @@ function renderContextView() {
         const label = it.kind === "repo" ? `${it.project}/${it.repo}` : it.name;
         const b = el("button", "context-file", label);
         b.title = it.file;
-        b.onclick = () => openContextFile(it.file);
+        b.onclick = () => openContextFile(it.file, { project: it.project, repo: it.repo });
         li.appendChild(b);
         if (it.kind === "stack" && (!it.match || !it.match.length)) {
           li.appendChild(el("span", "dim context-match", "no match"));
@@ -800,12 +803,12 @@ function renderContextView() {
   else fetchContextDocs().then(build);
 }
 
-async function openContextFile(file, { quiet = false } = {}) {
+async function openContextFile(file, { quiet = false, project = null, repo = null } = {}) {
   try {
     const r = await fetch(`/api/contexts/doc?file=${encodeURIComponent(file)}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `/api/contexts/doc HTTP ${r.status}`);
-    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: false });
+    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: false, project, repo });
   } catch (e) {
     if (!quiet) contextStatus(`Could not open ${file}: ${e.message}`, "error");
   }
@@ -821,14 +824,16 @@ async function openRepoFromInput() {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `/api/contexts/repo HTTP ${r.status}`);
     // exists=false → the editor shows a template; Save creates the file.
-    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: !j.exists });
+    setContextEditor({ file: j.file, exists: j.exists, text: j.text, fresh: !j.exists, project, repo });
   } catch (e) {
     contextStatus(e.message, "error");
   }
 }
 
-function setContextEditor({ file, exists, text, fresh }) {
-  contextCurrent = { file, exists, fresh };
+function setContextEditor({ file, exists, text, fresh, project = null, repo = null }) {
+  contextCurrent = { file, exists, fresh, project, repo };
+  contextGenRunning = false;
+  contextGenOpen = !!contextNotes[file] || false; // reopen the notes panel when notes survive
   const view = $("#context-view");
   const form = view.querySelector(".context-editor");
   form.innerHTML = "";
@@ -843,6 +848,17 @@ function setContextEditor({ file, exists, text, fresh }) {
     ),
   );
   head.appendChild(el("span", "spacer"));
+  // AI drafting only applies to per-repo files (that's what reviewers consume
+  // per repository); project-wide/stacks stay hand-written.
+  if (project && repo) {
+    const ai = el("button", "ai", "✨ AI draft");
+    ai.title = "Draft or refine this file from your notes (the bot’s false positives, conventions). Result lands as a reviewable draft — nothing saved until you press Save.";
+    ai.onclick = () => {
+      contextGenOpen = !contextGenOpen;
+      buildContextGenPanel(form, ta);
+    };
+    head.appendChild(ai);
+  }
   const save = el("button", "primary", "💾 Save");
   save.onclick = () => saveContextFile();
   head.appendChild(save);
@@ -852,6 +868,10 @@ function setContextEditor({ file, exists, text, fresh }) {
     head.appendChild(del);
   }
   form.appendChild(head);
+
+  const gen = el("div", "context-gen");
+  gen.hidden = true;
+  form.appendChild(gen);
 
   const ta = el("textarea", "artifact");
   const draft = contextDrafts[file];
@@ -866,6 +886,81 @@ function setContextEditor({ file, exists, text, fresh }) {
     ? "Edits apply verbatim to the next review of this repo. HTML comments are stripped for the reviewers; stack files keep their <code>match:</code> front matter."
     : "This file does not exist yet — <b>Save</b> creates it and it takes effect on the next review.";
   form.appendChild(det);
+
+  if (contextGenOpen) buildContextGenPanel(form, ta);
+}
+
+// The AI-draft notes strip: devs paste false positives / what they need and the
+// agent fills in the rest of the file. Rebuilt on toggle and after generation.
+function buildContextGenPanel(form, ta) {
+  const panel = form.querySelector(".context-gen");
+  if (!panel) return;
+  panel.innerHTML = "";
+  panel.hidden = false;
+  panel.appendChild(
+    el("div", "context-gen-title", "✦ Draft with AI — paste false positives or what the bot should know; the agent writes the whole file from them"),
+  );
+  if (contextGenRunning) {
+    panel.appendChild(el("p", "dim context-gen-status", "Generating… this can take a minute."));
+    return;
+  }
+  const file = contextCurrent?.file;
+  const notes = el("textarea", "context-gen-notes");
+  notes.placeholder = "e.g. “This flag intentionally reuses the BEN field — never flag it as a breaking change.” …";
+  notes.value = contextNotes[file] || "";
+  notes.oninput = () => {
+    contextNotes[file] = notes.value;
+  };
+  panel.appendChild(notes);
+  const row = el("div", "context-gen-actions");
+  const go = el("button", "primary", "✦ Generate draft");
+  go.disabled = contextGenRunning;
+  go.onclick = () => generateContextDraftInUi(form, ta, notes.value);
+  row.appendChild(go);
+  const status = el("span", "context-gen-status dim");
+  row.appendChild(status);
+  panel.appendChild(row);
+  const hint = el("p", "dim hint");
+  hint.innerHTML =
+    "The draft replaces the editor text. It is grounded on your notes (and the repo’s <code>AGENTS.md</code> when readable) — review it, then <b>Save</b>. Nothing is written to disk until you Save.";
+  panel.appendChild(hint);
+}
+
+async function generateContextDraftInUi(form, ta, notes) {
+  const { file, project, repo, exists } = contextCurrent || {};
+  if (!project || !repo) {
+    return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
+  }
+  const existing = ta.value || "";
+  contextGenRunning = true;
+  contextGenOpen = true;
+  buildContextGenPanel(form, ta);
+  try {
+    const r = await fetch("/api/contexts/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, repo, notes, existing }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `/api/contexts/generate HTTP ${r.status}`);
+    // The draft replaces the editor text and is kept as an unsaved draft.
+    contextDrafts[file] = j.text;
+    ta.value = j.text;
+    if (!exists) contextCurrent.fresh = true;
+    contextGenRunning = false;
+    buildContextGenPanel(form, ta);
+    const st = panelStatus(form);
+    if (st) st.textContent = `AI drafted the file with ${j.model || "the context model"} — review it, then Save.`;
+    contextStatus(`AI drafted ${file}. Review it, then Save to make it live.`, "ok");
+  } catch (e) {
+    contextGenRunning = false;
+    buildContextGenPanel(form, ta);
+    contextStatus(`Generation failed: ${e.message}`, "error");
+  }
+}
+
+function panelStatus(form) {
+  return form.querySelector(".context-gen-actions .context-gen-status");
 }
 
 async function saveContextFile() {

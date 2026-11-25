@@ -14,6 +14,10 @@
 //   DELETE /api/contexts/doc?file=…    delete a context file
 //   GET  /api/contexts/repo?project=&repo=  resolve+read per-repo context
 //   PUT  /api/contexts/repo            {project, repo, text} create/update it
+//   POST /api/contexts/generate        {project, repo, notes, existing?,
+//                                       platform?} AI-draft the context file
+//                                       (returns a reviewable draft, never
+//                                       writes to disk)
 //   GET  /api/events              Server-Sent Events stream (live run updates)
 //   GET  /api/pulls?live=1        per-PR view: grouped reviews + live head/new
 //                                 commits since the last review (src/pulls.js)
@@ -65,6 +69,7 @@ import {
   deleteContextDoc,
   ContextEditorError,
 } from "./contextsEditor.js";
+import { generateContextDraft } from "./contextGen.js";
 import { log } from "./log.js";
 
 const UI_DIR = path.join(import.meta.dirname, "..", "ui");
@@ -243,7 +248,7 @@ async function replyTeachForce(config, ref, triggerCommentId, previous) {
   }
 }
 
-export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview } = {}) {
+export function createServer({ config, port = config.server.port, host = config.server.host, runReview: reviewRunner = runReview, generateDraft: draftRunner = generateContextDraft } = {}) {
   assertAnyBackendConfig(config);
   const clients = new Set();
   // One review runs at a time; extra requests (webhook or UI) wait in the queue.
@@ -719,6 +724,26 @@ export function createServer({ config, port = config.server.port, host = config.
             200,
             writeRepoContext(contextsDir, { project: body.project, repo: body.repo, text: body.text }),
           );
+        } catch (err) {
+          return sendContextError(res, err);
+        }
+      }
+      // AI-assisted drafting (the "Generate with AI" action in the Context
+      // page): run the `context-gen` agent with repo identity + developer
+      // notes (+ optional existing text) and return a DRAFT — never saved,
+      // the browser shows it in the editor for a human to review and Save.
+      if (url === "/api/contexts/generate" && method === "POST") {
+        const body = await readBody(req);
+        try {
+          const draft = await draftRunner({
+            config,
+            project: body.project,
+            repo: body.repo,
+            notes: body.notes,
+            existing: body.existing,
+            platform: body.platform === "github" ? "github" : "bitbucket",
+          });
+          return sendJson(res, 200, draft);
         } catch (err) {
           return sendContextError(res, err);
         }

@@ -32,6 +32,17 @@ below the `v0.2.x` entries.
   listing; a broken stack front matter is listed without its `match` — nothing
   the editor does can turn a review into a hard failure, matching the project's
   optional-helpers convention. New API: `GET/PUT/DELETE /api/contexts/…`.
+- **“✨ AI draft” writes the file for you.** For any per-repo context, developers
+  paste **false positives or what the bot should know** and the new `context-gen`
+  opencode agent ([`prompts/context-gen-base.md`](prompts/context-gen-base.md),
+  copied verbatim by `build:agents` like `pr-vision`) drafts the whole
+  `PROJECT-repo.md` file — grounded on the repo’s own `AGENTS.md` (default
+  branch) when readable. The result lands in the editor as a **reviewable
+  draft**: nothing is ever written to disk automatically, because curated
+  context is authoritative to reviewers. Run via `POST /api/contexts/generate`
+  (`src/contextGen.js`); the drafting model is `CONTEXT_GEN_MODEL`, falling back
+  to the consensus model then reviewer A, and no model configured disables the
+  button.
 
 ### Vision transcription reliability & observability
 
