@@ -1039,7 +1039,7 @@ function renderContextView() {
 
     const editor = el("div", "context-editor");
     editor.appendChild(
-      el("div", "empty", "Pick a context file in the tree on the left. Grayed repos have no context yet — click one to draft it and press <b>New</b>."),
+      el("div", "empty", "Pick a context file in the tree on the left. Grayed repos have no context yet — click one to draft it and press New."),
     );
     layout.appendChild(editor);
     view.appendChild(layout);
@@ -1253,7 +1253,12 @@ async function generateContextDraftInUi(form, ta, notes) {
     }
     reqFile = file; // drafts keyed by the editor's file (stacks/.new while naming)
     displayFile = resolved;
-    body = { kind: "stack", name: stackName, notes, existing: ta.value || "" };
+    // A brand-new stack (still being named) holds only the boilerplate template
+    // (match: []) in the editor. Send existing: "" so the agent drafts fresh and
+    // proposes match: patterns — passing the template as "existing" would make
+    // it "preserve" the empty pattern list, yielding a stack that never matches.
+    // A real on-disk stack passes its current content for refinement instead.
+    body = { kind: "stack", name: stackName, notes, existing: name != null ? "" : ta.value || "" };
   } else {
     if (!project || !repo) {
       return contextStatus("AI drafting needs a PROJECT/repo — open (or create) the per-repo context first.", "error");
@@ -1353,7 +1358,13 @@ async function saveContextFile() {
     await fetchContextDocs().then(() => {
       renderContextView();
     });
-    contextStatus(`Saved ${j.file} — the next review of this repo will use it.`, "ok");
+    const isStackFile = String(j.file || "").startsWith("stacks/");
+    contextStatus(
+      isStackFile
+        ? `Saved ${j.file} — the next review of files that match it will use these rules.`
+        : `Saved ${j.file} — the next review of this repo will use it.`,
+      "ok",
+    );
   } catch (e) {
     contextStatus(`Save failed: ${e.message}`, "error");
   }
