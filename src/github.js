@@ -16,6 +16,14 @@ import { log } from "./log.js";
 const USER_AGENT = "ai-pr-reviewer/1.0 (github adapter)";
 const API_VERSION = "2022-11-28";
 
+/** AbortError → explicit timeout error (deadline is ours alone; see request()). */
+function githubTimeoutError(method, pathname, timeoutMs, cause) {
+  const err = new Error(`GitHub ${method} ${pathname} timed out after ${timeoutMs}ms (no response)`);
+  err.timedOut = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
 /** Bitbucket-like user object ({slug,name,displayName,emailAddress} + login). */
 function normalizeUser(u = {}) {
   const login = u?.login ?? u?.name ?? u?.slug ?? null;
@@ -60,12 +68,15 @@ function mapChangeFile(f) {
 }
 
 export class GitHubClient {
-  constructor({ baseUrl = "https://api.github.com", token, username, verifyTls = true } = {}) {
+  constructor({ baseUrl = "https://api.github.com", token, username, verifyTls = true, requestTimeoutMs = 120_000 } = {}) {
     if (!token) throw new Error("GitHubClient: token is required");
     this.baseUrl = String(baseUrl).replace(/\/+$/, "");
     this.token = token;
     this.username = username || "";
     this.verifyTls = verifyTls !== false;
+    // Deadline per REST call (fetch + body read), parity with BitbucketClient. A
+    // lost/never-returning response must not wedge a review in a running stage.
+    this.requestTimeoutMs = requestTimeoutMs;
     if (!this.verifyTls) {
       // Global fetch (undici) honors this at TLS connect time.
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -88,7 +99,7 @@ export class GitHubClient {
     }
   }
 
-  async request(pathname, { accept = "application/vnd.github+json", method = "GET", body, headers = {}, raw = false, headersOut = null } = {}) {
+  async request(pathname, { accept = "application/vnd.github+json", method = "GET", body, headers = {}, raw = false, headersOut = null, timeoutMs = this.requestTimeoutMs } = {}) {
     const url = this.url(pathname);
     // Never send the bearer token to a foreign origin: an absolute URL that is
     // not on the configured API host is refused up front (mirror of the
@@ -103,25 +114,48 @@ export class GitHubClient {
       }
       throw new Error(`github client refuses a foreign host "${foreign}" (configured API host ${new URL(this.baseUrl).host})`);
     }
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: accept,
-        "User-Agent": USER_AGENT,
-        "X-GitHub-Api-Version": API_VERSION,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...headers,
-      },
-      ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
-    });
+    // Deadline covers the fetch AND the body read: a response that never arrives
+    // (or stalls mid-stream) must not hang the review forever. No other consumer
+    // aborts these requests, so an AbortError means we hit the timeout.
+    const controller = new AbortController();
+    // timeoutMs <= 0 disables the deadline.
+    let timer;
+    if (timeoutMs > 0) timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: accept,
+          "User-Agent": USER_AGENT,
+          "X-GitHub-Api-Version": API_VERSION,
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          ...headers,
+        },
+        ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err?.name === "AbortError") throw githubTimeoutError(method, pathname, timeoutMs, err);
+      throw err;
+    }
 
     if (headersOut && typeof res.headers?.get === "function") {
       const link = res.headers.get("link");
       if (link) headersOut.link = link;
     }
 
-    const text = await res.text();
+    let text;
+    try {
+      text = await res.text();
+    } catch (err) {
+      if (err?.name === "AbortError") throw githubTimeoutError(method, pathname, timeoutMs, err);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) {
       let detail = text;
       try {

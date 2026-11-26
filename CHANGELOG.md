@@ -10,6 +10,31 @@ below the `v0.2.x` entries.
 
 ---
 
+## Unreleased
+
+### API clients can no longer wedge a review in a "running" stage forever
+
+- A dead/lossy proxy (issue #6 class) could leave a **finished** review stuck at
+  a "running" stage in the dashboard forever: the Bitbucket/GitHub
+  `request()` (publish, head re-check, diff, metadata) had **no HTTP deadline**,
+  so a response that never arrived — e.g. the comment was accepted but the
+  connection never completed — kept `status.json` at `publish`/`render` and the
+  UI polling that stale file. `fetchBuffer()` already had this deadline; the core
+  REST path did not.
+- Both clients now abort a call that neither resolves nor rejects after
+  `API_REQUEST_TIMEOUT_MS` (default 120000 ms; `0` disables), covering the fetch
+  *and* the response body. Safe reads are retried as before; a lost write
+  (comment POST) fails cleanly and is **never blindly re-sent** (no duplicate
+  comment). A timed-out review now moves to **Failed** (with the timeout in the
+  error) instead of staying "running". The deadline is armed only after the rate
+  governor grants the request, so 429 breaker waits are not mis-measured.
+- New regression tests cover: hanging GETs (retried, then clear timeout), a
+  hanging publish POST (issued once), deadline armed after the governor wait,
+  and a fast response keeping a clean signal — for both the Bitbucket and
+  GitHub clients, plus the config knob.
+
+---
+
 ## v0.5.9 — 2026-11-25 — Context page: file tree, create stack files, AI draft for stacks
 
 ### Context page — folder/file tree in the left pane

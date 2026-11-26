@@ -189,6 +189,9 @@ export function loadConfig({ envFile } = {}) {
       // Webhook signature secret (Bitbucket DC). Empty = signatures not checked.
       webhookSecret: str("BITBUCKET_WEBHOOK_SECRET"),
       verifyTls: bool("VERIFY_TLS", true),
+      // HTTP deadline per REST call. A dead/lossy proxy must never wedge a
+      // review in a "running" stage forever with a response that never arrives.
+      requestTimeoutMs: int("API_REQUEST_TIMEOUT_MS", 120000),
     },
     github: {
       // GitHub REST API base. Defaults to github.com's API; for GitHub
@@ -206,6 +209,8 @@ export function loadConfig({ envFile } = {}) {
       // signatures are not checked.
       webhookSecret: str("GITHUB_WEBHOOK_SECRET"),
       verifyTls: bool("VERIFY_TLS", true),
+      // Same per-call deadline as Bitbucket (API_REQUEST_TIMEOUT_MS).
+      requestTimeoutMs: int("API_REQUEST_TIMEOUT_MS", 120000),
     },
     job: {
       // Safe default: never post to Bitbucket unless explicitly enabled.
