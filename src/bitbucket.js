@@ -23,6 +23,20 @@ function isSafeRead(method) {
   return method === "GET" || method === "HEAD";
 }
 
+/**
+ * Turn an AbortController AbortError into an explicit "timed out" error. The
+ * deadline is ours alone (no other consumer aborts these requests), so an
+ * AbortError always means the request hit its timeout — a dead/lossy proxy
+ * that never answers must not wedge a review in a "running" stage forever
+ * (issue #6, extended from fetchBuffer to request()).
+ */
+function timeoutError(platform, method, pathname, timeoutMs, cause) {
+  const err = new Error(`${platform} ${method} ${pathname} timed out after ${timeoutMs}ms (no response)`);
+  err.timedOut = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
 function isTransientStatus(status) {
   return status === 429 || status >= 500;
 }
@@ -69,13 +83,15 @@ function trimErrorDetail(text, contentType) {
 }
 
 export class BitbucketClient {
-  constructor({ baseUrl, token, username, verifyTls = true, governor = bitbucketGovernor, sleep = governor.sleep } = {}) {
+  constructor({ baseUrl, token, username, verifyTls = true, governor = bitbucketGovernor, sleep = governor.sleep, requestTimeoutMs = 120_000 } = {}) {
     if (!baseUrl) throw new Error("BitbucketClient: baseUrl is required");
     if (!token) throw new Error("BitbucketClient: token is required");
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
     this.username = username || "";
     this.verifyTls = verifyTls !== false;
+    // Deadline per REST call (fetch + body read). See request().
+    this.requestTimeoutMs = requestTimeoutMs;
     // One clock: request/fetchBuffer backoff uses this.sleep, which defaults to
     // the injected governor's sleep. Tests inject a single fake-clock governor
     // and don't pass a second sleep, so spacing, breaker and backoff agree.
@@ -93,16 +109,24 @@ export class BitbucketClient {
     return `${this.baseUrl}${p.startsWith("/") ? "" : "/"}${p}`;
   }
 
-  async request(pathname, { accept = "application/json", method = "GET", body, headers = {}, raw = false } = {}) {
+  async request(pathname, { accept = "application/json", method = "GET", body, headers = {}, raw = false, timeoutMs = this.requestTimeoutMs } = {}) {
     const url = this.url(pathname);
     for (let attempt = 0; attempt < BITBUCKET_MAX_ATTEMPTS; attempt++) {
       let res;
       let networkErr;
+      let timer;
       try {
         // Every request (including each retry) is paced and held by the shared
         // process-wide breaker. getAllPages needs no changes: each page calls
         // request(), so pagination is covered here too.
         await this.governor.acquire();
+        // Deadline armed only after the governor grants the request — a breaker
+        // wait (429 window) must not consume the caller's request budget
+        // (mirror of fetchBuffer). It stays armed across the body read below so
+        // a response that never arrives — or stalls mid-stream — aborts.
+        // timeoutMs <= 0 disables the deadline.
+        const controller = new AbortController();
+        if (timeoutMs > 0) timer = setTimeout(() => controller.abort(), timeoutMs);
         res = await fetch(url, {
           method,
           headers: {
@@ -112,11 +136,14 @@ export class BitbucketClient {
             ...headers,
           },
           ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
+          signal: controller.signal,
         });
       } catch (err) {
         networkErr = err;
       }
       if (networkErr) {
+        if (timer) clearTimeout(timer);
+        if (networkErr?.name === "AbortError") networkErr = timeoutError("Bitbucket", method, pathname, timeoutMs, networkErr);
         if (isSafeRead(method) && attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
           await this.sleep(computeBackoffMs(attempt));
           continue;
@@ -138,6 +165,21 @@ export class BitbucketClient {
         text = await res.text();
       } catch (err) {
         bodyErr = err;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      // The deadline can also fire while the body streams (server accepted the
+      // request but never delivers the payload — the git low-speed hang, issue
+      // #6). Treat it like a never-answering fetch: retry safe reads, fail
+      // writes (a lost POST is never blindly re-sent — no duplicate comment).
+      if (bodyErr?.name === "AbortError") {
+        const timeoutErr = timeoutError("Bitbucket", method, pathname, timeoutMs, bodyErr);
+        if (isSafeRead(method) && attempt < BITBUCKET_MAX_ATTEMPTS - 1) {
+          await this.sleep(computeBackoffMs(attempt));
+          continue;
+        }
+        throw timeoutErr;
       }
 
       if (!bodyErr && res.ok) {

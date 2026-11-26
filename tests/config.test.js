@@ -67,6 +67,19 @@ test("loadConfig reads the reviewer skip pairs", () => {
   });
 });
 
+test("loadConfig reads API_REQUEST_TIMEOUT_MS into both platform clients (default 120s)", () => {
+  withEnv({ API_REQUEST_TIMEOUT_MS: "45000" }, () => {
+    const config = loadConfig({ envFile: "/nonexistent/none.env" });
+    assert.equal(config.bitbucket.requestTimeoutMs, 45000);
+    assert.equal(config.github.requestTimeoutMs, 45000);
+  });
+  withEnv({ API_REQUEST_TIMEOUT_MS: undefined }, () => {
+    const config = loadConfig({ envFile: "/nonexistent/none.env" });
+    assert.equal(config.bitbucket.requestTimeoutMs, 120000);
+    assert.equal(config.github.requestTimeoutMs, 120000);
+  });
+});
+
 test("parsePathPatterns defaults to the i18n/gettext patterns when unset", () => {
   const patterns = parsePathPatterns("");
   assert.ok(patterns.length >= 3);

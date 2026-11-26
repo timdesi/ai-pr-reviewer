@@ -295,3 +295,47 @@ test("request surfaces GitHub error messages with the HTTP status", async () => 
     stub.restore();
   }
 });
+
+/** fetch that never resolves until its AbortSignal fires (a dead-proxy hang). */
+function hangingFetch() {
+  const calls = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (url, init) =>
+    new Promise((_resolve, reject) => {
+      calls.push({ url: String(url), init });
+      init?.signal?.addEventListener("abort", () => {
+        const e = new Error("The operation was aborted");
+        e.name = "AbortError";
+        reject(e);
+      });
+    });
+  return { calls, restore: () => { globalThis.fetch = orig; } };
+}
+
+test("request(): a never-answering response is aborted after the deadline with a clear timeout error", async () => {
+  const client = new GitHubClient({ token: "t", baseUrl: API, requestTimeoutMs: 40 });
+  const stub = hangingFetch();
+  try {
+    await assert.rejects(client.request("/repos/acme/widgets/pulls/42"), (err) => {
+      assert.match(err.message, /GET .*\/pulls\/42 timed out after 40ms/);
+      assert.equal(err.timedOut, true);
+      return true;
+    });
+    assert.equal(stub.calls.length, 1);
+    assert.equal(stub.calls[0].init.signal.aborted, true, "the request was aborted by the deadline");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("request(): a fast response is returned with an un-aborted signal (deadline cleared)", async () => {
+  const stub = stubFetch([{ url: /\/pulls\/42$/, body: PR }]);
+  try {
+    const client = new GitHubClient({ token: "t", baseUrl: API });
+    const pr = await client.getPullRequest({ projectKey: "acme", repoSlug: "widgets", prId: 42 });
+    assert.equal(pr.id, 42);
+    assert.equal(stub.calls[0].init.signal.aborted, false, "a fast response is never aborted");
+  } finally {
+    stub.restore();
+  }
+});

@@ -589,3 +589,130 @@ test("fetchBuffer(): the abort deadline is armed after the governor wait, not be
     globalThis.clearTimeout = realClearTimeout;
   }
 });
+
+// --- request() deadline (issue #6 class: a dead proxy must never wedge a
+// review in a "running" stage forever) ---------------------------------------
+
+/** fetch that never resolves until its AbortSignal fires (a dead-proxy hang). */
+function hangingFetch() {
+  const calls = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (url, init) =>
+    new Promise((_resolve, reject) => {
+      calls.push({ url: String(url), init });
+      init?.signal?.addEventListener("abort", () => {
+        const e = new Error("The operation was aborted");
+        e.name = "AbortError";
+        reject(e);
+      });
+    });
+  return { calls, restore: () => { globalThis.fetch = orig; } };
+}
+
+test("request(): a never-answering response is aborted after the deadline; safe GETs retry then surface a clear timeout", async () => {
+  const c = fakeClock();
+  const gov = new RequestGovernor({ now: c.now, sleep: c.sleep });
+  const client = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov, requestTimeoutMs: 40 });
+  const stub = hangingFetch();
+  try {
+    await assert.rejects(client.request("/rest/x"), (err) => {
+      assert.match(err.message, /Bitbucket GET \/rest\/x timed out after 40ms/);
+      assert.equal(err.timedOut, true);
+      return true;
+    });
+    assert.equal(stub.calls.length, 3, "a safe GET is retried across attempts, never wedging the caller");
+    for (const call of stub.calls) assert.equal(call.init.signal.aborted, true, "each attempt is aborted by the deadline");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("request(): a write (comment POST) whose response never arrives times out once and is never re-sent", async () => {
+  const c = fakeClock();
+  const gov = new RequestGovernor({ now: c.now, sleep: c.sleep });
+  const client = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov, requestTimeoutMs: 40 });
+  const stub = hangingFetch();
+  try {
+    await assert.rejects(client.postPullRequestComment({ ...COMMENT_REF, text: "hi" }), (err) => {
+      assert.match(err.message, /POST .*\/comments timed out after 40ms/);
+      assert.equal(err.timedOut, true);
+      return true;
+    });
+    assert.equal(stub.calls.length, 1, "a lost write is never blindly re-sent (no duplicate comment)");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("request(): the abort deadline is armed after the governor wait, not before", async () => {
+  const c = fakeClock();
+  let releaseGate = null;
+  const gate = new Promise((r) => (releaseGate = r));
+  const gov = new RequestGovernor({ now: c.now, sleep: c.sleep });
+  const realAcquire = gov.acquire.bind(gov);
+  // Hold the request in the governor queue so we can observe timer arming.
+  gov.acquire = async () => {
+    await realAcquire();
+    await gate;
+  };
+  const TIMEOUT = 12345;
+  const client = new BitbucketClient({ baseUrl: "https://bb.example.com", token: "t", governor: gov, requestTimeoutMs: TIMEOUT });
+
+  // Capture only request()'s abort timer (distinct delay), forwarding all
+  // other timers to the real implementation. No real time needs to elapse.
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const armed = new Map();
+  globalThis.setTimeout = (fn, ms) => {
+    if (ms === TIMEOUT) {
+      const id = Symbol("abort-timer");
+      armed.set(id, fn);
+      return id;
+    }
+    return realSetTimeout(fn, ms);
+  };
+  globalThis.clearTimeout = (id) => {
+    if (armed.has(id)) {
+      armed.delete(id);
+      return;
+    }
+    return realClearTimeout(id);
+  };
+  const stub = stubFetch(() => response({ body: { ok: 1 } }), c.now);
+  let pending;
+  try {
+    pending = client.request("/rest/x");
+    await new Promise((r) => setImmediate(r)); // let it reach the held acquire()
+    assert.equal(stub.calls.length, 0, "no fetch while still queued in the governor");
+    assert.equal(
+      armed.size,
+      0,
+      "the abort timer must not be armed before the governor grants the request",
+    );
+
+    // Simulate the whole timeout elapsing while the request sat in the queue.
+    // With the timer armed late there is nothing to fire yet.
+    for (const fn of [...armed.values()]) fn();
+    releaseGate();
+    assert.deepEqual(await pending, { ok: 1 });
+    assert.equal(stub.calls[0].signal.aborted, false, "the issued fetch is not pre-aborted");
+  } finally {
+    releaseGate?.();
+    if (pending) await pending.catch(() => {});
+    stub.restore();
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+});
+
+test("request(): a fast response is returned with an un-aborted signal (deadline cleared)", async () => {
+  const c = fakeClock();
+  const { client } = makeClient(c);
+  const stub = stubFetch(() => response({ body: { ok: true } }), c.now);
+  try {
+    assert.deepEqual(await client.request("/rest/x"), { ok: true });
+    assert.equal(stub.calls[0].signal.aborted, false, "a fast response is never aborted");
+  } finally {
+    stub.restore();
+  }
+});
